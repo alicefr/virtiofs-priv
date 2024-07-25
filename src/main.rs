@@ -1,8 +1,8 @@
 #![feature(unix_socket_ancillary_data)]
 use clap::Parser;
 use libc::*;
-use std::error::Error;
 use std::fs;
+use std::io;
 use std::io::IoSliceMut;
 use std::os::fd::RawFd;
 use std::os::unix::net::{AncillaryData, SocketAncillary};
@@ -18,6 +18,8 @@ struct Args {
     #[arg(short, long)]
     socket: String,
 }
+
+const MAX_EVENTS: usize = 10;
 
 /* Structs from linux kernel: include/uapi/linux/seccomp.h
 *  struct seccomp_data {
@@ -47,112 +49,127 @@ const SECCOMP_IOCTL_NOTIF_ID_VALID: usize = 0x40082102;
 const SECCOMP_IOCTL_NOTIF_SEND: usize = 0xc0182101;
 
 #[repr(C)]
+#[derive(Default)]
 struct SeccompData {
     nr: c_int,
-    arch: c_uint,
-    instruction_pointer: c_ulonglong,
-    args: [c_ulonglong; 6],
-}
-
-impl Default for SeccompData {
-    fn default() -> SeccompData {
-        SeccompData {
-            nr: 0,
-            arch: 0,
-            instruction_pointer: 0,
-            args: [0, 0, 0, 0, 0, 0],
-        }
-    }
+    arch: u32,
+    instruction_pointer: u64,
+    args: [u64; 6],
 }
 
 #[repr(C)]
+#[derive(Default)]
 struct SeccompNotif {
-    id: c_ulonglong,
-    pid: c_uint,
-    flags: c_uint,
+    id: u64,
+    pid: u32,
+    flags: u32,
     data: SeccompData,
 }
 
-impl Default for SeccompNotif {
-    fn default() -> SeccompNotif {
-        SeccompNotif {
-            id: 0,
-            pid: 0,
-            flags: 0,
-            data: SeccompData::default(),
-        }
-    }
-}
-
 #[repr(C)]
+#[derive(Default)]
 struct SeccompNotifResp {
-    id: c_ulonglong,
-    val: c_long,
-    error: c_int,
-    flags: c_uint,
-}
-
-impl Default for SeccompNotifResp {
-    fn default() -> SeccompNotifResp {
-        SeccompNotifResp {
-            id: 0,
-            val: 0,
-            error: 0,
-            flags: 0,
-        }
-    }
+    id: u64,
+    val: i64,
+    error: i32,
+    flags: u32,
 }
 
 fn ioctl_seccomp(arg0: usize, arg1: usize, arg2: usize) {
-    let args = SyscallArgs {
-        arg0: arg0,
-        arg1: arg1,
-        arg2: arg2,
-        arg3: 0,
-        arg4: 0,
-        arg5: 0,
+    unsafe {
+        syscall(
+            syscalls::Sysno::ioctl,
+            &SyscallArgs::new(arg0, arg1, arg2, 0, 0, 0),
+        )
+        .expect("ioctl failed");
+    }
+    ()
+}
+
+fn epoll_create(fd: RawFd) -> io::Result<RawFd> {
+    if fd < 0 {
+        panic!("Invalid fd")
+    }
+    let epoll_fd = unsafe {
+        syscall(
+            syscalls::Sysno::epoll_create1,
+            &SyscallArgs::new(0, 0, 0, 0, 0, 0),
+        )
+        .expect("epoll_create1 failed")
     };
-    match unsafe { syscall(syscalls::Sysno::ioctl, &args) } {
-        Ok(0) => println!("recieved notification"),
-        Ok(ret) => println!("wrong return values: {}", ret),
-        Err(err) => panic!("ioctl failed: {}", err),
+    let event = libc::epoll_event {
+        events: EPOLLIN as u32,
+        u64: fd as u64,
     };
+    unsafe {
+        syscall(
+            syscalls::Sysno::epoll_ctl,
+            &SyscallArgs::new(
+                epoll_fd as usize,
+                libc::EPOLL_CTL_ADD as usize,
+                fd as usize,
+                ptr::addr_of!(event) as usize,
+                0,
+                0,
+            ),
+        )
+        .expect("epoll_ctl failed");
+    };
+
+    Ok(epoll_fd as i32)
 }
 
 fn monitor_process(fd: RawFd) {
+    let epoll_fd = epoll_create(fd).expect("failed to create events");
     // Start monitoring the process with the seccomp notifier
-    let mut req = SeccompNotif::default();
-    let mut resp = SeccompNotifResp::default();
-    // TODO: create polling of events to serve multiple syscalls
-    ioctl_seccomp(
-        fd as usize,
-        SECCOMP_IOCTL_NOTIF_RECV,
-        ptr::addr_of!(req) as usize,
-    );
-    if let Some(syscall) = syscalls::Sysno::new(req.data.nr as usize) {
-        println!("syscall: {}", syscall.name());
-    }
-    println!("syscall nr: {}", req.data.nr);
-    // TODO: Execute the privileged operation
-    println!("Execute privileged operation");
+    loop {
+        let events = [libc::epoll_event { events: 0, u64: 0 }; MAX_EVENTS];
+        unsafe {
+            syscall(
+                syscalls::Sysno::epoll_wait,
+                &SyscallArgs::new(
+                    epoll_fd as usize,
+                    ptr::addr_of!(events) as usize,
+                    MAX_EVENTS,
+                    i32::from(-1) as usize,
+                    0,
+                    0,
+                ),
+            )
+            .expect("epoll_create1 failed")
+        };
+        let req = SeccompNotif::default();
+        let mut resp = SeccompNotifResp::default();
+        ioctl_seccomp(
+            fd as usize,
+            SECCOMP_IOCTL_NOTIF_RECV,
+            ptr::addr_of!(req) as usize,
+        );
+        if let Some(syscall) = syscalls::Sysno::new(req.data.nr as usize) {
+            println!("recieved syscall: {}", syscall.name());
+        } else {
+            println!("recieved syscall nr: {}", req.data.nr);
+        }
+        // TODO: Execute the privileged operation
+        println!("Execute privileged operation");
 
-    // TODO: Return the corresponding result to the target process to unblock the syscall.
-    // For now, we simply return success
-    // Validate if the ID of the request is still valid
-    let id = req.id;
-    println!("test id:{:#x}", id);
-    ioctl_seccomp(
-        fd as usize,
-        SECCOMP_IOCTL_NOTIF_ID_VALID,
-        ptr::addr_of!(id) as usize,
-    );
-    resp.id = req.id;
-    // Let the syscall of the target return
-    ioctl_seccomp(
-        fd as usize,
-        SECCOMP_IOCTL_NOTIF_SEND,
-        ptr::addr_of!(resp) as usize,
-    )
+        // TODO: Return the corresponding result to the target process to unblock the syscall.
+        // For now, we simply return success
+        // Validate if the ID of the request is still valid
+        let id = req.id;
+        ioctl_seccomp(
+            fd as usize,
+            SECCOMP_IOCTL_NOTIF_ID_VALID,
+            ptr::addr_of!(id) as usize,
+        );
+        resp.id = req.id;
+        // Let the syscall of the target return
+        ioctl_seccomp(
+            fd as usize,
+            SECCOMP_IOCTL_NOTIF_SEND,
+            ptr::addr_of!(resp) as usize,
+        )
+    }
 }
 
 fn handle_client(socket: UnixStream) {
@@ -161,15 +178,15 @@ fn handle_client(socket: UnixStream) {
     let mut buf1 = [1; 8];
     let mut buf2 = [2; 16];
     let mut buf3 = [3; 8];
-    let mut bufs = &mut [
+    let bufs = &mut [
         IoSliceMut::new(&mut buf1),
         IoSliceMut::new(&mut buf2),
         IoSliceMut::new(&mut buf3),
     ][..];
-    let mut fds = [0; 8];
+    //    let mut fds = [0; 8];
     let mut ancillary_buffer = [0; 128];
     let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
-    let size = match socket.recv_vectored_with_ancillary(bufs, &mut ancillary) {
+    match socket.recv_vectored_with_ancillary(bufs, &mut ancillary) {
         Ok(data) => data,
         Err(e) => panic!("wrong type of data recieved {e}"),
     };
