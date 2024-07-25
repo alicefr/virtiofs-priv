@@ -55,7 +55,8 @@
                 {
                        "action" : "SCMP_ACT_NOTIFY",
                        "names" : [
-			        "chown"
+				"open_by_handle_at",
+				"name_to_handle_at"
                        ]
                 },
 		{
