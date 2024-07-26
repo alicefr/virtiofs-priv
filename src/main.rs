@@ -7,6 +7,7 @@ use std::io::IoSliceMut;
 use std::os::fd::RawFd;
 use std::os::unix::net::{AncillaryData, SocketAncillary};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::ptr;
 use std::thread;
 use syscalls::{syscall, SyscallArgs};
@@ -207,7 +208,9 @@ fn handle_client(socket: UnixStream) {
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
     println!("Socket path file: {}", args.socket);
-    fs::remove_file(args.socket.clone())?;
+    if Path::new(&args.socket).exists() {
+        fs::remove_file(args.socket.clone())?;
+    }
     let listener = UnixListener::bind(args.socket.clone())?;
     for stream in listener.incoming() {
         match stream {
