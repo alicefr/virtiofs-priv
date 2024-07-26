@@ -1,9 +1,13 @@
 #![feature(unix_socket_ancillary_data)]
+use crate::fs::File;
 use clap::Parser;
 use libc::*;
 use std::fs;
 use std::io;
 use std::io::IoSliceMut;
+use std::mem;
+use std::os::fd::AsFd;
+use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
 use std::os::unix::net::{AncillaryData, SocketAncillary};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -119,6 +123,124 @@ fn epoll_create(fd: RawFd) -> io::Result<RawFd> {
 
     Ok(epoll_fd as i32)
 }
+fn is_cookie_valid(fd: RawFd, id: u64) {
+    ioctl_seccomp(
+        fd as usize,
+        SECCOMP_IOCTL_NOTIF_ID_VALID,
+        ptr::addr_of!(id) as usize,
+    );
+}
+
+/*
+ * C struct from: include/linux/fs.h
+ *
+ *    struct file_handle {
+ *          __u32 handle_bytes;
+ *          int handle_type;
+ *          /* file identifier */
+ *          unsigned char f_handle[];
+ *    };
+ */
+
+#[repr(C)]
+#[derive(Debug)]
+struct FileHandle {
+    handle_bytes: u32,
+    handle_type: c_int,
+    f_handle: *mut c_uchar,
+}
+
+impl Default for FileHandle {
+    fn default() -> FileHandle {
+        FileHandle {
+            handle_bytes: 0,
+            handle_type: 0,
+            f_handle: std::ptr::null_mut(),
+        }
+    }
+}
+
+fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
+    println!("process pid: {}", req.pid);
+    is_cookie_valid(fd, req.id);
+    let mut f_handle: [c_uchar; 128] = [0x0; 128];
+    // Read file handle from proc
+    let mut fh = FileHandle::default();
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open(format!("/proc/{}/mem", req.pid))
+        .expect("failed to open mem from proc");
+    let memFD = file.as_fd().as_raw_fd();
+    let addr = req.data.args[2].try_into().unwrap();
+    unsafe {
+        syscall(
+            syscalls::Sysno::pread64,
+            &SyscallArgs::new(
+                memFD as usize,
+                ptr::addr_of!(fh) as usize,
+                mem::size_of::<FileHandle>(),
+                addr,
+                0,
+                0,
+            ),
+        )
+        .expect("pread failed");
+    }
+    unsafe {
+        syscall(
+            syscalls::Sysno::pread64,
+            &SyscallArgs::new(
+                memFD as usize,
+                ptr::addr_of!(f_handle) as usize,
+                mem::size_of::<c_char>() * fh.handle_bytes as usize,
+                addr + mem::size_of::<FileHandle>(),
+                0,
+                0,
+            ),
+        )
+        .expect("pread failed for the file_handle");
+    }
+    // TODO: write actual data
+    fh.handle_type = 3;
+    f_handle = [0xf; 128];
+    unsafe {
+        syscall(
+            syscalls::Sysno::pwrite64,
+            &SyscallArgs::new(
+                memFD as usize,
+                ptr::addr_of!(fh) as usize,
+                mem::size_of::<FileHandle>(),
+                req.data.args[2].try_into().unwrap(),
+                0,
+                0,
+            ),
+        )
+        .expect("write failed");
+    }
+    unsafe {
+        syscall(
+            syscalls::Sysno::pwrite64,
+            &SyscallArgs::new(
+                memFD as usize,
+                ptr::addr_of!(f_handle) as usize,
+                mem::size_of::<c_char>() * fh.handle_bytes as usize,
+                addr + mem::size_of::<FileHandle>(),
+                0,
+                0,
+            ),
+        )
+        .expect("pread failed for the file_handle");
+    }
+}
+
+fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) {
+    match nr {
+        syscalls::Sysno::name_to_handle_at => do_name_to_handle_at(fd, req),
+        syscalls::Sysno::open_by_handle_at => println!("open_by_handle_at not implemented yet"),
+        _ => println!("no operation implemented for {}", nr.name()),
+    }
+}
 
 fn monitor_process(fd: RawFd) {
     let epoll_fd = epoll_create(fd).expect("failed to create events");
@@ -146,23 +268,16 @@ fn monitor_process(fd: RawFd) {
             SECCOMP_IOCTL_NOTIF_RECV,
             ptr::addr_of!(req) as usize,
         );
-        if let Some(syscall) = syscalls::Sysno::new(req.data.nr as usize) {
-            println!("recieved syscall: {}", syscall.name());
+        if let Some(s) = syscalls::Sysno::new(req.data.nr as usize) {
+            println!("recieved syscall: {}", s.name());
+            do_operations(fd, s, &req);
         } else {
-            println!("recieved syscall nr: {}", req.data.nr);
+            panic!("syscall nr: {} not recognized", req.data.nr)
         }
-        // TODO: Execute the privileged operation
-        println!("Execute privileged operation");
 
         // TODO: Return the corresponding result to the target process to unblock the syscall.
         // For now, we simply return success
-        // Validate if the ID of the request is still valid
-        let id = req.id;
-        ioctl_seccomp(
-            fd as usize,
-            SECCOMP_IOCTL_NOTIF_ID_VALID,
-            ptr::addr_of!(id) as usize,
-        );
+        is_cookie_valid(fd, req.id);
         resp.id = req.id;
         // Let the syscall of the target return
         ioctl_seccomp(
