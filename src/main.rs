@@ -171,13 +171,13 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
         .write(true)
         .open(format!("/proc/{}/mem", req.pid))
         .expect("failed to open mem from proc");
-    let memFD = file.as_fd().as_raw_fd();
+    let mem_fd = file.as_fd().as_raw_fd();
     let addr = req.data.args[2].try_into().unwrap();
     unsafe {
         syscall(
             syscalls::Sysno::pread64,
             &SyscallArgs::new(
-                memFD as usize,
+                mem_fd as usize,
                 ptr::addr_of!(fh) as usize,
                 mem::size_of::<FileHandle>(),
                 addr,
@@ -191,7 +191,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
         syscall(
             syscalls::Sysno::pread64,
             &SyscallArgs::new(
-                memFD as usize,
+                mem_fd as usize,
                 ptr::addr_of!(f_handle) as usize,
                 mem::size_of::<c_char>() * fh.handle_bytes as usize,
                 addr + mem::size_of::<FileHandle>(),
@@ -208,7 +208,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
         syscall(
             syscalls::Sysno::pwrite64,
             &SyscallArgs::new(
-                memFD as usize,
+                mem_fd as usize,
                 ptr::addr_of!(fh) as usize,
                 mem::size_of::<FileHandle>(),
                 req.data.args[2].try_into().unwrap(),
@@ -222,7 +222,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
         syscall(
             syscalls::Sysno::pwrite64,
             &SyscallArgs::new(
-                memFD as usize,
+                mem_fd as usize,
                 ptr::addr_of!(f_handle) as usize,
                 mem::size_of::<c_char>() * fh.handle_bytes as usize,
                 addr + mem::size_of::<FileHandle>(),
