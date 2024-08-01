@@ -1,9 +1,9 @@
+use crate::filehandle::{open_by_handle_at, FileHandle};
+use crate::oslib::openat;
 use clap::Parser;
-use std::{fs, io};
 use std::fs::File;
 use std::path::PathBuf;
-use crate::filehandle::{FileHandle, open_by_handle_at};
-use crate::oslib::openat;
+use std::{fs, io};
 
 mod filehandle;
 mod oslib;
@@ -17,7 +17,6 @@ struct Cli {
     #[arg(long)]
     file: String,
 }
-
 
 fn open(path: PathBuf) -> io::Result<File> {
     let root_file = openat(
@@ -34,7 +33,6 @@ fn main() {
     // open virtiofsd "root" directory
     let shared_dir = fs::canonicalize(args.shared_dir).expect("valid shared dir");
     let root_dir_fd = open(shared_dir).expect("open shared dir");
-
 
     // access file
     let file_fh = {
