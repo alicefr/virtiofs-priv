@@ -9,6 +9,7 @@ use std::mem;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{AncillaryData, SocketAncillary};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -327,6 +328,10 @@ fn main() -> std::io::Result<()> {
         fs::remove_file(args.socket.clone())?;
     }
     let listener = UnixListener::bind(args.socket.clone())?;
+
+    fs::set_permissions(args.socket, fs::Permissions::from_mode(0o777))
+        .expect("set the socket permission");
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
