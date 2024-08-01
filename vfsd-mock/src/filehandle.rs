@@ -9,7 +9,7 @@ pub use sys::CFileHandle;
 const EMPTY_CSTR: &[u8] = b"\0";
 pub type MountId = u64;
 
-#[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FileHandle {
     mnt_id: MountId,
     pub handle: CFileHandle,
@@ -85,7 +85,7 @@ pub fn open_by_handle_at(
 mod sys {
     const MAX_HANDLE_SZ: usize = 128;
 
-    #[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
     #[repr(C)]
     pub struct CFileHandle {
         handle_bytes: libc::c_uint,
