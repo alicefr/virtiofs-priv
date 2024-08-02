@@ -2,9 +2,9 @@ use crate::filehandle::{open_by_handle_at, FileHandle};
 use crate::oslib::openat;
 use clap::Parser;
 use std::fs::File;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::{fs, io};
-use std::os::fd::AsRawFd;
 
 mod filehandle;
 mod oslib;
@@ -41,9 +41,9 @@ fn main() {
         let file_fd = open(shared_file).expect("open file");
         FileHandle::from_fd(&file_fd).expect("name_to_handle_at")
     };
-    println!("(name_to_handle_at) received FH: {:?}\n", file_fh);
+    println!("\n(name_to_handle_at) received FH: {:?}\n", file_fh);
 
     let f = open_by_handle_at(&root_dir_fd, &file_fh.handle, 0).expect("open_by_handle_at");
-    println!("(open_by_handle_at) received FD: {}", f.as_raw_fd());
+    println!("\n(open_by_handle_at) received FD: {}\n", f.as_raw_fd());
     println!("it works!");
 }

@@ -53,6 +53,13 @@ pub fn name_to_handle_at(
     mount_id: &mut libc::c_int,
     flags: libc::c_int,
 ) -> std::io::Result<()> {
+    println!(
+        "name_to_handle_at(dirfd: {}, pathname addr: 0x{:x}, fh addr: 0x{:x}, mount_id addr: 0x{:x})",
+        dirfd.as_raw_fd(),
+        pathname.as_ptr() as usize,
+        file_handle as *mut CFileHandle as usize,
+        mount_id as *mut libc::c_int as usize
+    );
     // SAFETY: `dirfd` is a valid file descriptor, `file_handle`
     // is a valid reference to `CFileHandle`, and `mount_id` is
     // valid reference to an `int`
@@ -73,6 +80,12 @@ pub fn open_by_handle_at(
     file_handle: &CFileHandle,
     flags: libc::c_int,
 ) -> std::io::Result<File> {
+    println!(
+        "open_by_handle_at(mount_fd: {}, fh addr: 0x{:x})",
+        mount_fd.as_raw_fd(),
+        file_handle as *const CFileHandle as usize
+    );
+
     // SAFETY: `mount_fd` is a valid file descriptor and `file_handle`
     // is a valid reference to `CFileHandle`
     let fd =
