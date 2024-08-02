@@ -1,6 +1,6 @@
 #![feature(unix_socket_ancillary_data)]
 
-mod filehandle;
+mod oslib;
 
 use crate::fs::File;
 use clap::Parser;
@@ -9,9 +9,9 @@ use std::fs;
 use std::io;
 use std::io::IoSliceMut;
 use std::mem;
-use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{AncillaryData, SocketAncillary};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -20,7 +20,8 @@ use std::ptr;
 use std::thread;
 use syscalls::{syscall, SyscallArgs};
 
-use filehandle::CFileHandle;
+use crate::oslib::get_process_fd;
+use vfsd_mock::filehandle::{CFileHandle, FileHandle, MAX_HANDLE_SZ};
 
 /// Monitor rootless virtiofs
 #[derive(Parser, Debug)]
@@ -155,6 +156,13 @@ struct FileHandleHeader {
     handle_type: c_int,
 }
 
+fn process_name_to_handle_at(pid: u32, fd: u64) -> (OwnedFd, FileHandle) {
+    let fd = get_process_fd(pid, fd).expect("file fd");
+    // I get EOPNOTSUPP if the fs os overlayfs
+    let fh = FileHandle::from_fd(&fd).expect("get filename fh");
+    (fd, fh)
+}
+
 fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
     println!("process pid: {}", req.pid);
     println!(
@@ -173,7 +181,10 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
     let mem_fd = file.as_fd().as_raw_fd();
     let addr = req.data.args[2].try_into().unwrap();
 
-    // let's first read just the header
+    // Note: If we need to read the pathname (I don't think so)
+    // this can be tricky to make it safe
+
+    // let's read just the header
     unsafe {
         syscall(
             syscalls::Sysno::pread64,
@@ -189,12 +200,15 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
         .expect("pread failed");
     }
 
-    println!("FH header: {:?}", fh);
+    println!("\nFH header: {:?}\n", fh);
+
+    let process_f_info = process_name_to_handle_at(req.pid, req.data.args[0]);
+    println!("FH : {:?}", process_f_info.1);
 
     // TODO: write actual data
 
     let mut fh = CFileHandle::default();
-    fh.handle_bytes = filehandle::MAX_HANDLE_SZ as libc::c_uint;
+    fh.handle_bytes = MAX_HANDLE_SZ as libc::c_uint;
     fh.handle_type = 5;
     fh.f_handle = core::array::from_fn(|i| (i + 1) as u8);
 

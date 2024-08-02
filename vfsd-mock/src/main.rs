@@ -1,13 +1,10 @@
-use crate::filehandle::{open_by_handle_at, FileHandle};
-use crate::oslib::openat;
 use clap::Parser;
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::{fs, io};
-
-mod filehandle;
-mod oslib;
+use vfsd_mock::filehandle::{open_by_handle_at, FileHandle};
+use vfsd_mock::oslib::openat;
 
 #[derive(Parser)]
 struct Cli {

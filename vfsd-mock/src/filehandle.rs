@@ -4,7 +4,7 @@ use std::io;
 use std::io::Error;
 use std::os::fd::{AsRawFd, FromRawFd};
 
-pub use sys::CFileHandle;
+pub use sys::{CFileHandle, MAX_HANDLE_SZ};
 
 const EMPTY_CSTR: &[u8] = b"\0";
 pub type MountId = u64;
@@ -38,7 +38,7 @@ impl FileHandle {
 
 // A helper function that check the return value of a C function call
 // and wraps it in a `Result` type, returning the `errno` code as `Err`.
-fn check_retval<T: From<i8> + PartialEq>(t: T) -> std::io::Result<T> {
+pub fn check_retval<T: From<i8> + PartialEq>(t: T) -> std::io::Result<T> {
     if t == T::from(-1_i8) {
         Err(Error::last_os_error())
     } else {
@@ -97,14 +97,14 @@ pub fn open_by_handle_at(
 }
 
 mod sys {
-    const MAX_HANDLE_SZ: usize = 128;
+    pub const MAX_HANDLE_SZ: usize = 128;
 
     #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
     #[repr(C)]
     pub struct CFileHandle {
-        handle_bytes: libc::c_uint,
-        handle_type: libc::c_int,
-        f_handle: [u8; MAX_HANDLE_SZ],
+        pub handle_bytes: libc::c_uint,
+        pub handle_type: libc::c_int,
+        pub f_handle: [u8; MAX_HANDLE_SZ],
     }
 
     impl Default for CFileHandle {
