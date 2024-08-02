@@ -1,4 +1,7 @@
 #![feature(unix_socket_ancillary_data)]
+
+mod filehandle;
+
 use crate::fs::File;
 use clap::Parser;
 use libc::*;
@@ -16,6 +19,8 @@ use std::path::Path;
 use std::ptr;
 use std::thread;
 use syscalls::{syscall, SyscallArgs};
+
+use filehandle::CFileHandle;
 
 /// Monitor rootless virtiofs
 #[derive(Parser, Debug)]
@@ -144,29 +149,22 @@ fn is_cookie_valid(fd: RawFd, id: u64) {
  */
 
 #[repr(C)]
-#[derive(Debug)]
-struct FileHandle {
+#[derive(Debug, Default)]
+struct FileHandleHeader {
     handle_bytes: u32,
     handle_type: c_int,
-    f_handle: *mut c_uchar,
-}
-
-impl Default for FileHandle {
-    fn default() -> FileHandle {
-        FileHandle {
-            handle_bytes: 0,
-            handle_type: 0,
-            f_handle: std::ptr::null_mut(),
-        }
-    }
 }
 
 fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
     println!("process pid: {}", req.pid);
+    println!(
+        "process args: dir_Fd {}, pathname addr: 0x{:x},  fh addr: 0x{:x}, mount_id addr: {:x}",
+        req.data.args[0], req.data.args[1], req.data.args[2], req.data.args[3]
+    );
+
     is_cookie_valid(fd, req.id);
-    let mut f_handle: [c_uchar; 128] = [0x0; 128];
     // Read file handle from proc
-    let mut fh = FileHandle::default();
+    let fh = FileHandleHeader::default();
     let file = File::options()
         .read(true)
         .write(true)
@@ -174,13 +172,15 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
         .expect("failed to open mem from proc");
     let mem_fd = file.as_fd().as_raw_fd();
     let addr = req.data.args[2].try_into().unwrap();
+
+    // let's first read just the header
     unsafe {
         syscall(
             syscalls::Sysno::pread64,
             &SyscallArgs::new(
                 mem_fd as usize,
                 ptr::addr_of!(fh) as usize,
-                mem::size_of::<FileHandle>(),
+                mem::size_of::<FileHandleHeader>(),
                 addr,
                 0,
                 0,
@@ -188,50 +188,30 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
         )
         .expect("pread failed");
     }
-    unsafe {
-        syscall(
-            syscalls::Sysno::pread64,
-            &SyscallArgs::new(
-                mem_fd as usize,
-                ptr::addr_of!(f_handle) as usize,
-                mem::size_of::<c_char>() * fh.handle_bytes as usize,
-                addr + mem::size_of::<FileHandle>(),
-                0,
-                0,
-            ),
-        )
-        .expect("pread failed for the file_handle");
-    }
+
+    println!("FH header: {:?}", fh);
+
     // TODO: write actual data
-    fh.handle_type = 3;
-    f_handle = [0xf; 128];
+
+    let mut fh = CFileHandle::default();
+    fh.handle_bytes = filehandle::MAX_HANDLE_SZ as libc::c_uint;
+    fh.handle_type = 5;
+    fh.f_handle = core::array::from_fn(|i| (i + 1) as u8);
+
+    // write the whole file handle at once
     unsafe {
         syscall(
             syscalls::Sysno::pwrite64,
             &SyscallArgs::new(
                 mem_fd as usize,
                 ptr::addr_of!(fh) as usize,
-                mem::size_of::<FileHandle>(),
+                mem::size_of::<CFileHandle>(),
                 req.data.args[2].try_into().unwrap(),
                 0,
                 0,
             ),
         )
         .expect("write failed");
-    }
-    unsafe {
-        syscall(
-            syscalls::Sysno::pwrite64,
-            &SyscallArgs::new(
-                mem_fd as usize,
-                ptr::addr_of!(f_handle) as usize,
-                mem::size_of::<c_char>() * fh.handle_bytes as usize,
-                addr + mem::size_of::<FileHandle>(),
-                0,
-                0,
-            ),
-        )
-        .expect("pread failed for the file_handle");
     }
 }
 
