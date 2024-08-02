@@ -54,8 +54,9 @@ pub fn name_to_handle_at(
     flags: libc::c_int,
 ) -> std::io::Result<()> {
     println!(
-        "name_to_handle_at(dirfd: {}, pathname addr: 0x{:x}, fh addr: 0x{:x}, mount_id addr: 0x{:x})",
+        "name_to_handle_at(dirfd: {}, pathname: {:?} (0x{:x}), fh addr: 0x{:x}, mount_id addr: 0x{:x})",
         dirfd.as_raw_fd(),
+        pathname,
         pathname.as_ptr() as usize,
         file_handle as *mut CFileHandle as usize,
         mount_id as *mut libc::c_int as usize
