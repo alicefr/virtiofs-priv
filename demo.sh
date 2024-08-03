@@ -1,11 +1,16 @@
 #!/bin/bash -xe
 
+# let's use target as temporal directory since it's ignored by git
+mkdir -p target/shared-dir
+touch target/shared-dir/demo-file
+
 podman run --rm -ti --name demo \
 	--user test \
-	 -w /home/test \
+	--security-opt label=disable  \
+	--volume $(pwd)/target/shared-dir:/shared-dir:U \
 	--security-opt=seccomp=demo.json \
 	--annotation run.oci.seccomp.receiver=/tmp/demo.sock \
 	vfsd-mock:latest \
-	/usr/local/bin/vfsd-mock --shared-dir /home/test/share-dir  --file /home/test/share-dir/demo
+	/usr/local/bin/vfsd-mock --shared-dir /shared-dir  --file /shared-dir/demo-file
 #	busybox \
 #	sh -c "touch /tmp/blabla && chown 1000:1000 /tmp/blabla"

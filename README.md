@@ -13,7 +13,7 @@ Build the mock virtiofs image:
 ```
 Run the virtiofs-priv program:
 ```bash
-target/debug/virtiofs-priv -s /tmp/demo.sock
+./target/debug/vfsd-priv -s /tmp/demo.sock
 ```
 Launch the rootless container with the `demo.sh` script
 ```bash

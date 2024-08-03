@@ -9,8 +9,11 @@ edition = "2021"
 clap = { version = "4.5.10", features = ["derive"] }
 libc = "0.2.155"
 syscalls = "0.6.18"
-vfsd-mock = {path = "vfsd-mock"}
 
+[[bin]]
+name = "vfsd-priv"
+path = "src/vfsd-priv.rs"
 
-[workspace]
-members = ["vfsd-mock"]
+[[bin]]
+name = "vfsd-mock"
+path = "src/vfsd-mock.rs"

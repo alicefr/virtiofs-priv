@@ -1,6 +1,7 @@
 #![feature(unix_socket_ancillary_data)]
 
 mod oslib;
+mod filehandle;
 
 use crate::fs::File;
 use clap::Parser;
@@ -21,7 +22,7 @@ use std::thread;
 use syscalls::{syscall, SyscallArgs};
 
 use crate::oslib::get_process_fd;
-use vfsd_mock::filehandle::{CFileHandle, FileHandle, MAX_HANDLE_SZ};
+use filehandle::{CFileHandle, FileHandle, MAX_HANDLE_SZ};
 
 /// Monitor rootless virtiofs
 #[derive(Parser, Debug)]

@@ -3,8 +3,11 @@ use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::{fs, io};
-use vfsd_mock::filehandle::{open_by_handle_at, FileHandle};
-use vfsd_mock::oslib::openat;
+use oslib::openat;
+use crate::filehandle::{FileHandle, open_by_handle_at};
+
+mod oslib;
+mod filehandle;
 
 #[derive(Parser)]
 struct Cli {
