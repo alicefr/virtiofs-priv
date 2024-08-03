@@ -17,6 +17,8 @@ unsafe fn pidfd_getfd(
 }
 
 pub fn get_process_fd(pid: u32, target_fd: u64) -> io::Result<OwnedFd> {
+    // Note: we should cache the process pidfd, so getting the fd will
+    // be single syscall "pidfd_getfd"
     let pid_fd = unsafe { pidfd_open(pid as _, 0) };
     if pid_fd == -1 {
         return Err(Error::last_os_error());

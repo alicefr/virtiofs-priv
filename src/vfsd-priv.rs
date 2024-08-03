@@ -22,7 +22,8 @@ use std::thread;
 use syscalls::{syscall, SyscallArgs};
 
 use crate::oslib::get_process_fd;
-use filehandle::{CFileHandle, FileHandle, MAX_HANDLE_SZ};
+use filehandle::{CFileHandle, FileHandle};
+use crate::filehandle::{MAX_HANDLE_SZ, MountId};
 
 /// Monitor rootless virtiofs
 #[derive(Parser, Debug)]
@@ -157,11 +158,47 @@ struct FileHandleHeader {
     handle_type: c_int,
 }
 
-fn process_name_to_handle_at(pid: u32, fd: u64) -> (OwnedFd, FileHandle) {
+fn process_name_to_handle_at(pid: u32, fd: u64) -> FileHandle {
+    // Note: get a FD dup, instead of using "pidfd_open/pidfd_getfd" we can open
+    // "/proc/{pid}/fd/{fd}", we should check which one is faster, taking into account
+    // that we can cache the "pidfd". (I think pidfd_getfd() is faster but I could be wrong,
+    // so we need to benchmark it.
     let fd = get_process_fd(pid, fd).expect("file fd");
-    // I get EOPNOTSUPP if the fs os overlayfs
-    let fh = FileHandle::from_fd(&fd).expect("get filename fh");
-    (fd, fh)
+
+    // Note: name_to_handle_at() returns EOPNOTSUPP if the fs is overlayfs
+    // Note: we allocate MAX_HANDLE_SZ, but we should set "handle_bytes: MAX_HANDLE_SZ - signature_size"
+    // to make space for the signature and check for `EOVERFLOW`. Or make virtiofsd to allocate
+    // "handle_bytes: MAX_HANDLE_SZ + signature_size", but we MUST send MAX_HANDLE_SZ bytes, because
+    // we cannot allocate more the MAX_HANDLE_SZ bytes, from name_to_handle_at(2):
+    //      "EINVAL handle->handle_bytes is greater than MAX_HANDLE_SZ."
+    //
+    // If we don't want to use an extra byte, instead of checking the signature we can
+    // just XOR the signature at the end of the file handle, if the result is invalid
+    // open_by_handle_at() will return an error, but we could get a valid FH just by (bad) luck
+    FileHandle::from_fd(&fd).expect("get filename fh")
+    // maybe we could return fd, to delay the close() syscall after writing the FH
+}
+
+fn is_mount_id_allowed(_mnt_id: MountId) -> bool {
+    // TODO: we need to check if the mount id is the PVC in the POD
+    return true
+}
+
+// ugly, but mutating the parameter will save us a memcopy
+// (maybe is unnecessary if the compiler is smart enough(?))
+fn sign(fh: &mut FileHandle) {
+    // TODO: do a proper signing
+    // Note: according to FIPS we can safely truncate a HMAC to 64 bit, but probably we
+    // should include an extra byte to define the algorithm, just in case we need to change it
+    // in the future, allowing updating virtiofsd "in-place" via migration (I think this is a
+    // Kubevirt requirement).
+
+    // for now lets just add a sum at the end of the fh_handle
+    let sum: u64 = fh.handle.f_handle.iter().fold(0, |acc, x| acc + *x as u64);
+    println!("FH signature: {:?}", sum.to_ne_bytes());
+    const SIGN_SIZE_BYTES: usize = (u64::BITS / 8) as usize;
+    const START: usize = MAX_HANDLE_SZ - SIGN_SIZE_BYTES;
+    fh.handle.f_handle[START..].copy_from_slice(&sum.to_ne_bytes());
 }
 
 fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
@@ -173,6 +210,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
 
     is_cookie_valid(fd, req.id);
     // Read file handle from proc
+    // Note: we should use 'process_vm_readv/process_vm_writev' it should be faster since is just a single syscall
     let fh = FileHandleHeader::default();
     let file = File::options()
         .read(true)
@@ -186,6 +224,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
     // this can be tricky to make it safe
 
     // let's read just the header
+    // Note: we don't really need to read it, we know virtiofsd will allocate 128 bytes
     unsafe {
         syscall(
             syscalls::Sysno::pread64,
@@ -203,15 +242,16 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
 
     println!("\nFH header: {:?}\n", fh);
 
-    let process_f_info = process_name_to_handle_at(req.pid, req.data.args[0]);
-    println!("FH : {:?}", process_f_info.1);
+    let mut fh = process_name_to_handle_at(req.pid, req.data.args[0]);
+    println!("Received FH : {:?}", fh);
 
-    // TODO: write actual data
+    // check if mount id is allowed
+    if !is_mount_id_allowed(fh.mnt_id) {
+        // TODO: return EACCES or EBADF? (see openat(2))
+    }
 
-    let mut fh = CFileHandle::default();
-    fh.handle_bytes = MAX_HANDLE_SZ as libc::c_uint;
-    fh.handle_type = 5;
-    fh.f_handle = core::array::from_fn(|i| (i + 1) as u8);
+    // sign FH
+    sign(&mut fh);
 
     // write the whole file handle at once
     unsafe {
@@ -219,7 +259,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
             syscalls::Sysno::pwrite64,
             &SyscallArgs::new(
                 mem_fd as usize,
-                ptr::addr_of!(fh) as usize,
+                ptr::addr_of!(fh.handle) as usize,
                 mem::size_of::<CFileHandle>(),
                 req.data.args[2].try_into().unwrap(),
                 0,

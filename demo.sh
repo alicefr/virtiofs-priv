@@ -1,4 +1,4 @@
-#!/bin/bash -xe
+#!/bin/bash -x
 
 # let's use target as temporal directory since it's ignored by git
 mkdir -p target/shared-dir

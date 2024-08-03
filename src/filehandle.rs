@@ -11,7 +11,7 @@ pub type MountId = u64;
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FileHandle {
-    mnt_id: MountId,
+    pub mnt_id: MountId,
     pub handle: CFileHandle,
 }
 
