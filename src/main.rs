@@ -155,7 +155,13 @@ struct FileHandleHeader {
     handle_type: c_int,
 }
 
-fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
+#[derive(Debug, Default)]
+struct ResultOp {
+    error: i32,
+    value: i64,
+}
+
+fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     println!("process pid: {}", req.pid);
     println!(
         "process args: dir_Fd {}, pathname addr: 0x{:x},  fh addr: 0x{:x}, mount_id addr: {:x}",
@@ -213,13 +219,67 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
         )
         .expect("write failed");
     }
+    ResultOp { error: 0, value: 0 }
 }
 
-fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) {
+fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
+    is_cookie_valid(fd, req.id);
+    // Read file handle from proc
+    let fh = FileHandleHeader::default();
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open(format!("/proc/{}/mem", req.pid))
+        .expect("failed to open mem from proc");
+    let mem_fd = file.as_fd().as_raw_fd();
+    let addr = req.data.args[1].try_into().unwrap();
+    let fh = FileHandleHeader::default();
+    unsafe {
+        syscall(
+            syscalls::Sysno::pread64,
+            &SyscallArgs::new(
+                mem_fd as usize,
+                ptr::addr_of!(fh) as usize,
+                mem::size_of::<FileHandleHeader>(),
+                addr,
+                0,
+                0,
+            ),
+        )
+        .expect("pread failed");
+    }
+    // TODO verify the signature
+
+    // Impersonate the syscall on the privileged side
+    unsafe {
+        let res = syscall(
+            syscalls::Sysno::open_by_handle_at,
+            &SyscallArgs::new(
+                req.data.args[0] as usize,
+                ptr::addr_of!(fh) as usize,
+                req.data.args[2] as usize,
+                0,
+                0,
+                0,
+            ),
+        )
+        .expect("open_by_handle_at failed");
+
+        // Inject the fd in the target process and return the correct fd
+        {
+            ResultOp {
+                error: 0,
+                value: res as i64,
+            }
+        }
+    }
+}
+
+fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) -> ResultOp {
     match nr {
         syscalls::Sysno::name_to_handle_at => do_name_to_handle_at(fd, req),
-        syscalls::Sysno::open_by_handle_at => println!("open_by_handle_at not implemented yet"),
-        _ => println!("no operation implemented for {}", nr.name()),
+        syscalls::Sysno::open_by_handle_at => do_open_by_handle_at(fd, req),
+        _ => panic!("no operation implemented for {}", nr.name()),
     }
 }
 
@@ -251,21 +311,19 @@ fn monitor_process(fd: RawFd) {
         );
         if let Some(s) = syscalls::Sysno::new(req.data.nr as usize) {
             println!("recieved syscall: {}", s.name());
-            do_operations(fd, s, &req);
+            let res = do_operations(fd, s, &req);
+            is_cookie_valid(fd, req.id);
+            resp.id = req.id;
+            resp.val = res.value;
+            // Let the syscall of the target return
+            ioctl_seccomp(
+                fd as usize,
+                SECCOMP_IOCTL_NOTIF_SEND,
+                ptr::addr_of!(resp) as usize,
+            )
         } else {
             panic!("syscall nr: {} not recognized", req.data.nr)
         }
-
-        // TODO: Return the corresponding result to the target process to unblock the syscall.
-        // For now, we simply return success
-        is_cookie_valid(fd, req.id);
-        resp.id = req.id;
-        // Let the syscall of the target return
-        ioctl_seccomp(
-            fd as usize,
-            SECCOMP_IOCTL_NOTIF_SEND,
-            ptr::addr_of!(resp) as usize,
-        )
     }
 }
 
