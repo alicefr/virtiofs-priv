@@ -231,7 +231,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     // let's read just the header
     // Note: we don't really need to read it, we know virtiofsd will allocate 128 bytes
     unsafe {
-        syscall(
+        if let Err(err) = syscall(
             syscalls::Sysno::pread64,
             &SyscallArgs::new(
                 mem_fd as usize,
@@ -241,8 +241,10 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
                 0,
                 0,
             ),
-        )
-        .expect("pread failed");
+        ) {
+            println!("pread failed: {}", err);
+            return ResultOp { val: 0, error: -1 };
+        }
     }
 
     println!("\nFH header: {:?}\n", fh);
@@ -252,7 +254,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
 
     // check if mount id is allowed
     if !is_mount_id_allowed(fh.mnt_id) {
-        // TODO: return EACCES or EBADF? (see openat(2))
+        return ResultOp { error: -1, val: 0 };
     }
 
     // sign FH
@@ -260,7 +262,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
 
     // write the whole file handle at once
     unsafe {
-        syscall(
+        if let Err(err) = syscall(
             syscalls::Sysno::pwrite64,
             &SyscallArgs::new(
                 mem_fd as usize,
@@ -270,16 +272,26 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
                 0,
                 0,
             ),
-        )
-        .expect("write failed");
+        ) {
+            println!("write failed: {}", err);
+            return ResultOp { val: 0, error: -1 };
+        }
     }
+    ResultOp { val: 0, error: 0 }
 }
 
-fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) {
+fn open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
+    ResultOp { val: 0, error: 0 }
+}
+
+fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) -> ResultOp {
     match nr {
         syscalls::Sysno::name_to_handle_at => do_name_to_handle_at(fd, req),
-        syscalls::Sysno::open_by_handle_at => println!("open_by_handle_at not implemented yet"),
-        _ => println!("no operation implemented for {}", nr.name()),
+        syscalls::Sysno::open_by_handle_at => open_by_handle_at(fd, req),
+        _ => {
+            println!("no operation implemented for {}", nr.name());
+            ResultOp { val: 0, error: -1 }
+        }
     }
 }
 
@@ -309,17 +321,20 @@ fn monitor_process(fd: RawFd) {
             SECCOMP_IOCTL_NOTIF_RECV,
             ptr::addr_of!(req) as usize,
         );
-        if let Some(s) = syscalls::Sysno::new(req.data.nr as usize) {
-            println!("recieved syscall: {}", s.name());
-            do_operations(fd, s, &req);
-        } else {
-            panic!("syscall nr: {} not recognized", req.data.nr)
-        }
+        let res = match syscalls::Sysno::new(req.data.nr as usize) {
+            Some(s) => {
+                println!("recieved syscall: {}", s.name());
+                do_operations(fd, s, &req)
+            }
+            _ => panic!("syscall nr: {} not recognized", req.data.nr),
+        };
 
         // TODO: Return the corresponding result to the target process to unblock the syscall.
         // For now, we simply return success
         is_cookie_valid(fd, req.id);
         resp.id = req.id;
+        resp.val = res.val;
+        resp.error = res.error;
         // Let the syscall of the target return
         ioctl_seccomp(
             fd as usize,
