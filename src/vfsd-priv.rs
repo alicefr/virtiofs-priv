@@ -1,7 +1,7 @@
 #![feature(unix_socket_ancillary_data)]
 
-mod oslib;
 mod filehandle;
+mod oslib;
 
 use crate::fs::File;
 use clap::Parser;
@@ -21,9 +21,9 @@ use std::ptr;
 use std::thread;
 use syscalls::{syscall, SyscallArgs};
 
+use crate::filehandle::{MountId, MAX_HANDLE_SZ};
 use crate::oslib::get_process_fd;
 use filehandle::{CFileHandle, FileHandle};
-use crate::filehandle::{MAX_HANDLE_SZ, MountId};
 
 /// Monitor rootless virtiofs
 #[derive(Parser, Debug)]
@@ -158,6 +158,11 @@ struct FileHandleHeader {
     handle_type: c_int,
 }
 
+struct ResultOp {
+    val: i64,
+    error: i32,
+}
+
 fn process_name_to_handle_at(pid: u32, fd: u64) -> FileHandle {
     // Note: get a FD dup, instead of using "pidfd_open/pidfd_getfd" we can open
     // "/proc/{pid}/fd/{fd}", we should check which one is faster, taking into account
@@ -181,7 +186,7 @@ fn process_name_to_handle_at(pid: u32, fd: u64) -> FileHandle {
 
 fn is_mount_id_allowed(_mnt_id: MountId) -> bool {
     // TODO: we need to check if the mount id is the PVC in the POD
-    return true
+    return true;
 }
 
 // ugly, but mutating the parameter will save us a memcopy
@@ -201,7 +206,7 @@ fn sign(fh: &mut FileHandle) {
     fh.handle.f_handle[START..].copy_from_slice(&sum.to_ne_bytes());
 }
 
-fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) {
+fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     println!("process pid: {}", req.pid);
     println!(
         "process args: dir_Fd {}, pathname addr: 0x{:x},  fh addr: 0x{:x}, mount_id addr: {:x}",
