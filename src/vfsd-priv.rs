@@ -6,6 +6,8 @@ mod oslib;
 use crate::fs::File;
 use clap::Parser;
 use libc::*;
+use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::io::IoSliceMut;
@@ -55,12 +57,23 @@ const MAX_EVENTS: usize = 10;
 *          __s32 error;
 *          __u32 flags;
 *  };
+*
+*  struct seccomp_notif_addfd {
+*          __u64 id;           /* Cookie value */
+*          __u32 flags;        /* Flags */
+*          __u32 srcfd;        /* Local file descriptor number */
+*          __u32 newfd;        /* 0 or desired file descriptor
+*                                 number in target */
+*          __u32 newfd_flags;  /* Flags to set on target file
+*                            descriptor */
+*  };
 */
 
 // Only for x86_64
 const SECCOMP_IOCTL_NOTIF_RECV: usize = 0xc0502100;
 const SECCOMP_IOCTL_NOTIF_ID_VALID: usize = 0x40082102;
 const SECCOMP_IOCTL_NOTIF_SEND: usize = 0xc0182101;
+const SECCOMP_IOCTL_NOTIF_ADDFD: usize = 0x40182103;
 
 #[repr(C)]
 #[derive(Default)]
@@ -89,15 +102,26 @@ struct SeccompNotifResp {
     flags: u32,
 }
 
-fn ioctl_seccomp(arg0: usize, arg1: usize, arg2: usize) {
+#[repr(C)]
+#[derive(Default)]
+struct SeccompNotifAddfd {
+    id: u64,
+    flags: u32,
+    srcfd: u32,
+    newfd: u32,
+    newfd_flags: u32,
+}
+
+fn ioctl_seccomp(arg0: usize, arg1: usize, arg2: usize) -> Result<usize, OpError> {
     unsafe {
-        syscall(
+        match syscall(
             syscalls::Sysno::ioctl,
             &SyscallArgs::new(arg0, arg1, arg2, 0, 0, 0),
-        )
-        .expect("ioctl failed");
+        ) {
+            Ok(res) => Ok(res),
+            Err(err) => Err(OpError::new(format!("ioctl failed: {}", err).as_str())),
+        }
     }
-    ()
 }
 
 fn epoll_create(fd: RawFd) -> io::Result<RawFd> {
@@ -206,25 +230,57 @@ fn sign(fh: &mut FileHandle) {
     fh.handle.f_handle[START..].copy_from_slice(&sum.to_ne_bytes());
 }
 
-fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
-    println!("process pid: {}", req.pid);
-    println!(
-        "process args: dir_Fd {}, pathname addr: 0x{:x},  fh addr: 0x{:x}, mount_id addr: {:x}",
-        req.data.args[0], req.data.args[1], req.data.args[2], req.data.args[3]
-    );
+#[derive(Debug)]
+struct OpError {
+    msg: String,
+}
 
+impl OpError {
+    fn new(msg: &str) -> OpError {
+        OpError {
+            msg: msg.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for OpError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.msg)
+    }
+}
+
+impl Error for OpError {
+    fn description(&self) -> &str {
+        &self.msg
+    }
+}
+
+fn get_mem_file(pid: u32) -> Result<File, OpError> {
+    match File::options()
+        .read(true)
+        .write(true)
+        .open(format!("/proc/{}/mem", pid))
+    {
+        Ok(f) => return Ok(f),
+        Err(err) => {
+            return Err(OpError::new(
+                format!("failed to open mem from proc: {}", err).as_str(),
+            ))
+        }
+    };
+}
+
+fn read_file_handler_header(
+    fd: RawFd,
+    req: &SeccompNotif,
+    mem_fd: RawFd,
+    addr: usize,
+) -> Result<FileHandleHeader, OpError> {
     is_cookie_valid(fd, req.id);
     // Read file handle from proc
     // Note: we should use 'process_vm_readv/process_vm_writev' it should be faster since is just a single syscall
     let fh = FileHandleHeader::default();
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .open(format!("/proc/{}/mem", req.pid))
-        .expect("failed to open mem from proc");
-    let mem_fd = file.as_fd().as_raw_fd();
     let addr = req.data.args[2].try_into().unwrap();
-
     // Note: If we need to read the pathname (I don't think so)
     // this can be tricky to make it safe
 
@@ -242,12 +298,61 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
                 0,
             ),
         ) {
-            println!("pread failed: {}", err);
-            return ResultOp { val: 0, error: -1 };
+            return Err(OpError::new(format!("pread64 failed: {}", err).as_str()));
         }
     }
+    Ok(fh)
+}
 
-    println!("\nFH header: {:?}\n", fh);
+fn read_file_handler(
+    fd: RawFd,
+    req: &SeccompNotif,
+    mem_fd: RawFd,
+    addr: usize,
+) -> Result<CFileHandle, OpError> {
+    is_cookie_valid(fd, req.id);
+    let fh = CFileHandle::default();
+    unsafe {
+        if let Err(err) = syscall(
+            syscalls::Sysno::pread64,
+            &SyscallArgs::new(
+                mem_fd as usize,
+                ptr::addr_of!(fh) as usize,
+                mem::size_of::<CFileHandle>(),
+                addr,
+                0,
+                0,
+            ),
+        ) {
+            return Err(OpError::new(format!("pread64 failed: {}", err).as_str()));
+        }
+    }
+    Ok(fh)
+}
+
+fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
+    println!("process pid: {}", req.pid);
+    println!(
+        "process args: dir_Fd {}, pathname addr: 0x{:x},  fh addr: 0x{:x}, mount_id addr: {:x}",
+        req.data.args[0], req.data.args[1], req.data.args[2], req.data.args[3]
+    );
+    let file = match get_mem_file(req.pid) {
+        Ok(fd) => fd,
+        Err(err) => {
+            println!("{}", err);
+            return ResultOp { val: 0, error: -1 };
+        }
+    };
+    let mem_fd = file.as_fd().as_raw_fd();
+    // Do we need this?
+    let fhh = match read_file_handler_header(fd, req, mem_fd, req.data.args[2] as usize) {
+        Ok(fh) => fh,
+        Err(err) => {
+            println!("{}", err);
+            return ResultOp { val: 0, error: -1 };
+        }
+    };
+    println!("\nFH header: {:?}\n", fhh);
 
     let mut fh = process_name_to_handle_at(req.pid, req.data.args[0]);
     println!("Received FH : {:?}", fh);
@@ -280,14 +385,83 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     ResultOp { val: 0, error: 0 }
 }
 
-fn open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
-    ResultOp { val: 0, error: 0 }
+fn create_fd_target(fd: RawFd, id: u64, srcfd: usize) -> Result<usize, OpError> {
+    let resp = SeccompNotifAddfd {
+        id: id,
+        flags: 0,
+        srcfd: srcfd as u32,
+        newfd: 0,
+        newfd_flags: 0,
+    };
+    match ioctl_seccomp(
+        fd as usize,
+        SECCOMP_IOCTL_NOTIF_ADDFD,
+        ptr::addr_of!(resp) as usize,
+    ) {
+        Ok(fd) => Ok(fd),
+        Err(err) => Err(err),
+    }
+}
+
+fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
+    let file = match get_mem_file(req.pid) {
+        Ok(fd) => fd,
+        Err(err) => {
+            println!("{}", err);
+            return ResultOp { val: 0, error: -1 };
+        }
+    };
+    let mem_fd = file.as_fd().as_raw_fd();
+    let fhh = match read_file_handler(fd, req, mem_fd, req.data.args[1] as usize) {
+        Ok(fhh) => fhh,
+        Err(err) => {
+            println!("{}", err);
+            return ResultOp { val: 0, error: -1 };
+        }
+    };
+    // TODO: verify signature
+    let mount_fd = match get_process_fd(req.pid, req.data.args[0]) {
+        Ok(fd) => fd,
+        Err(err) => {
+            println!("failed to get mount fd: {}", err);
+            return ResultOp { val: 0, error: -1 };
+        }
+    };
+
+    let src_fd = unsafe {
+        match syscall(
+            syscalls::Sysno::open_by_handle_at,
+            &SyscallArgs::new(
+                mount_fd.as_fd().as_raw_fd() as usize,
+                ptr::addr_of!(fhh) as usize,
+                req.data.args[2] as usize,
+                0,
+                0,
+                0,
+            ),
+        ) {
+            Ok(fd) => fd,
+            Err(err) => {
+                println!("open_by_handle_at: {}", err);
+                return ResultOp { val: 0, error: -1 };
+            }
+        }
+    };
+    let target_fd = match create_fd_target(fd, req.id, src_fd) {
+        Ok(fd) => fd,
+        Err(err) => return ResultOp { val: 0, error: -1 },
+    };
+    println!("fd: {}", target_fd);
+    ResultOp {
+        val: target_fd as i64,
+        error: 0,
+    }
 }
 
 fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) -> ResultOp {
     match nr {
         syscalls::Sysno::name_to_handle_at => do_name_to_handle_at(fd, req),
-        syscalls::Sysno::open_by_handle_at => open_by_handle_at(fd, req),
+        syscalls::Sysno::open_by_handle_at => do_open_by_handle_at(fd, req),
         _ => {
             println!("no operation implemented for {}", nr.name());
             ResultOp { val: 0, error: -1 }
@@ -341,6 +515,7 @@ fn monitor_process(fd: RawFd) {
             SECCOMP_IOCTL_NOTIF_SEND,
             ptr::addr_of!(resp) as usize,
         )
+        .expect("ioctl failed");
     }
 }
 
