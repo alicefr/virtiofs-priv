@@ -270,61 +270,60 @@ fn get_mem_file(pid: u32) -> Result<File, OpError> {
     };
 }
 
-fn read_file_handler_header(
-    fd: RawFd,
-    req: &SeccompNotif,
-    mem_fd: RawFd,
-    addr: usize,
-) -> Result<FileHandleHeader, OpError> {
-    is_cookie_valid(fd, req.id);
-    // Read file handle from proc
-    // Note: we should use 'process_vm_readv/process_vm_writev' it should be faster since is just a single syscall
-    let fh = FileHandleHeader::default();
-    let addr = req.data.args[2].try_into().unwrap();
-    // Note: If we need to read the pathname (I don't think so)
-    // this can be tricky to make it safe
-
-    // let's read just the header
-    // Note: we don't really need to read it, we know virtiofsd will allocate 128 bytes
+fn write_file_handler(fh: &FileHandle, pid: u32, addr: u64) -> Result<(), OpError> {
+    let remote = iovec {
+        iov_base: addr as *mut c_void,
+        iov_len: mem::size_of::<CFileHandle>(),
+    };
+    let local = iovec {
+        iov_base: ptr::addr_of!(fh.handle) as *mut c_void,
+        iov_len: mem::size_of::<CFileHandle>(),
+    };
     unsafe {
         if let Err(err) = syscall(
-            syscalls::Sysno::pread64,
+            syscalls::Sysno::process_vm_writev,
             &SyscallArgs::new(
-                mem_fd as usize,
-                ptr::addr_of!(fh) as usize,
-                mem::size_of::<FileHandleHeader>(),
-                addr,
-                0,
+                pid as usize,
+                ptr::addr_of!(local) as usize,
+                1,
+                ptr::addr_of!(remote) as usize,
+                1,
                 0,
             ),
         ) {
-            return Err(OpError::new(format!("pread64 failed: {}", err).as_str()));
+            return Err(OpError::new(
+                format!("process_vm_writev failed: {}", err).as_str(),
+            ));
         }
     }
-    Ok(fh)
+    Ok(())
 }
 
-fn read_file_handler(
-    fd: RawFd,
-    req: &SeccompNotif,
-    mem_fd: RawFd,
-    addr: usize,
-) -> Result<CFileHandle, OpError> {
-    is_cookie_valid(fd, req.id);
+fn read_file_handler(pid: u32, addr: u64) -> Result<CFileHandle, OpError> {
     let fh = CFileHandle::default();
+    let remote = iovec {
+        iov_base: addr as *mut c_void,
+        iov_len: mem::size_of::<CFileHandle>(),
+    };
+    let local = iovec {
+        iov_base: ptr::addr_of!(fh) as *mut c_void,
+        iov_len: mem::size_of::<CFileHandle>(),
+    };
     unsafe {
         if let Err(err) = syscall(
-            syscalls::Sysno::pread64,
+            syscalls::Sysno::process_vm_readv,
             &SyscallArgs::new(
-                mem_fd as usize,
-                ptr::addr_of!(fh) as usize,
-                mem::size_of::<CFileHandle>(),
-                addr,
-                0,
+                pid as usize,
+                ptr::addr_of!(local) as usize,
+                1,
+                ptr::addr_of!(remote) as usize,
+                1,
                 0,
             ),
         ) {
-            return Err(OpError::new(format!("pread64 failed: {}", err).as_str()));
+            return Err(OpError::new(
+                format!("process_vm_read failed: {}", err).as_str(),
+            ));
         }
     }
     Ok(fh)
@@ -336,23 +335,15 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
         "process args: dir_Fd {}, pathname addr: 0x{:x},  fh addr: 0x{:x}, mount_id addr: {:x}",
         req.data.args[0], req.data.args[1], req.data.args[2], req.data.args[3]
     );
-    let file = match get_mem_file(req.pid) {
-        Ok(fd) => fd,
-        Err(err) => {
-            println!("{}", err);
-            return ResultOp { val: 0, error: -1 };
-        }
-    };
-    let mem_fd = file.as_fd().as_raw_fd();
     // Do we need this?
-    let fhh = match read_file_handler_header(fd, req, mem_fd, req.data.args[2] as usize) {
+    let fh = match read_file_handler(req.pid, req.data.args[2]) {
         Ok(fh) => fh,
         Err(err) => {
             println!("{}", err);
             return ResultOp { val: 0, error: -1 };
         }
     };
-    println!("\nFH header: {:?}\n", fhh);
+    println!("\nFH: {:?}\n", fh);
 
     let mut fh = process_name_to_handle_at(req.pid, req.data.args[0]);
     println!("Received FH : {:?}", fh);
@@ -365,22 +356,9 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     // sign FH
     sign(&mut fh);
 
-    // write the whole file handle at once
-    unsafe {
-        if let Err(err) = syscall(
-            syscalls::Sysno::pwrite64,
-            &SyscallArgs::new(
-                mem_fd as usize,
-                ptr::addr_of!(fh.handle) as usize,
-                mem::size_of::<CFileHandle>(),
-                req.data.args[2].try_into().unwrap(),
-                0,
-                0,
-            ),
-        ) {
-            println!("write failed: {}", err);
-            return ResultOp { val: 0, error: -1 };
-        }
+    if let Err(err) = write_file_handler(&fh, req.pid, req.data.args[2]) {
+        println!("failed to write the file handler: {}", err);
+        return ResultOp { val: 0, error: -1 };
     }
     ResultOp { val: 0, error: 0 }
 }
@@ -404,15 +382,8 @@ fn create_fd_target(fd: RawFd, id: u64, srcfd: usize) -> Result<usize, OpError> 
 }
 
 fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
-    let file = match get_mem_file(req.pid) {
-        Ok(fd) => fd,
-        Err(err) => {
-            println!("{}", err);
-            return ResultOp { val: 0, error: -1 };
-        }
-    };
-    let mem_fd = file.as_fd().as_raw_fd();
-    let fhh = match read_file_handler(fd, req, mem_fd, req.data.args[1] as usize) {
+    is_cookie_valid(fd, req.id);
+    let fhh = match read_file_handler(req.pid, req.data.args[1]) {
         Ok(fhh) => fhh,
         Err(err) => {
             println!("{}", err);
@@ -458,8 +429,10 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     }
 }
 
-fn set_mount_ns() -> Result<(), OpError> {
-    let file = match File::options().read(true).open("/proc/self/ns/mnt") {
+fn set_mount_ns(pid: u32) -> Result<(), OpError> {
+    let path = format!("/proc/{}/ns/mnt", pid);
+    println!("Set mount namespace to {}", path);
+    let file = match File::options().read(true).open(path) {
         Ok(f) => f,
         Err(err) => {
             print!("failed opening proc mnt");
@@ -512,7 +485,7 @@ fn send_response(fd: RawFd, req: &SeccompNotif, res: &ResultOp) {
 }
 
 fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) {
-    if let Err(err) = set_mount_ns() {
+    if let Err(err) = set_mount_ns(req.pid) {
         print!("Failed to set the mount ns: {}", err);
         return;
     }
