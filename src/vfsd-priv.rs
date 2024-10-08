@@ -458,15 +458,73 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     }
 }
 
-fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) -> ResultOp {
-    match nr {
+fn set_mount_ns() -> Result<(), OpError> {
+    let file = match File::options().read(true).open("/proc/self/ns/mnt") {
+        Ok(f) => f,
+        Err(err) => {
+            print!("failed opening proc mnt");
+            return Err(OpError::new(
+                format!("failed to open mount ns from proc: {}", err).as_str(),
+            ));
+        }
+    };
+    unsafe {
+        if let Err(err) = syscall(
+            syscalls::Sysno::unshare,
+            &SyscallArgs::new(CLONE_FS as usize, 0, 0, 0, 0, 0),
+        ) {
+            return Err(OpError::new(format!("unshare failed: {}", err).as_str()));
+        }
+    }
+    unsafe {
+        match syscall(
+            syscalls::Sysno::setns,
+            &SyscallArgs::new(
+                file.as_fd().as_raw_fd() as usize,
+                CLONE_NEWNS as usize,
+                0,
+                0,
+                0,
+                0,
+            ),
+        ) {
+            Ok(_) => Ok(()),
+            Err(err) => Err(OpError::new(format!("setns failed: {}", err).as_str())),
+        }
+    }
+}
+
+fn send_response(fd: RawFd, req: &SeccompNotif, res: &ResultOp) {
+    is_cookie_valid(fd, req.id);
+    let resp = SeccompNotifResp {
+        id: req.id,
+        val: res.val,
+        error: res.error,
+        flags: 0,
+    };
+    // Let the syscall of the target return
+    ioctl_seccomp(
+        fd as usize,
+        SECCOMP_IOCTL_NOTIF_SEND,
+        ptr::addr_of!(resp) as usize,
+    )
+    .expect("ioctl failed");
+}
+
+fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) {
+    if let Err(err) = set_mount_ns() {
+        print!("Failed to set the mount ns: {}", err);
+        return;
+    }
+    let res = match nr {
         syscalls::Sysno::name_to_handle_at => do_name_to_handle_at(fd, req),
         syscalls::Sysno::open_by_handle_at => do_open_by_handle_at(fd, req),
         _ => {
             println!("no operation implemented for {}", nr.name());
             ResultOp { val: 0, error: -1 }
         }
-    }
+    };
+    send_response(fd, req, &res);
 }
 
 fn monitor_process(fd: RawFd) {
@@ -489,33 +547,18 @@ fn monitor_process(fd: RawFd) {
             .expect("epoll_create1 failed")
         };
         let req = SeccompNotif::default();
-        let mut resp = SeccompNotifResp::default();
         ioctl_seccomp(
             fd as usize,
             SECCOMP_IOCTL_NOTIF_RECV,
             ptr::addr_of!(req) as usize,
         );
-        let res = match syscalls::Sysno::new(req.data.nr as usize) {
+        match syscalls::Sysno::new(req.data.nr as usize) {
             Some(s) => {
                 println!("recieved syscall: {}", s.name());
-                do_operations(fd, s, &req)
+                thread::spawn(move || do_operations(fd, s, &req));
             }
             _ => panic!("syscall nr: {} not recognized", req.data.nr),
         };
-
-        // TODO: Return the corresponding result to the target process to unblock the syscall.
-        // For now, we simply return success
-        is_cookie_valid(fd, req.id);
-        resp.id = req.id;
-        resp.val = res.val;
-        resp.error = res.error;
-        // Let the syscall of the target return
-        ioctl_seccomp(
-            fd as usize,
-            SECCOMP_IOCTL_NOTIF_SEND,
-            ptr::addr_of!(resp) as usize,
-        )
-        .expect("ioctl failed");
     }
 }
 
