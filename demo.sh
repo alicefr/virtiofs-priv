@@ -12,5 +12,3 @@ podman run --rm -ti --name demo \
 	--annotation run.oci.seccomp.receiver=/tmp/demo.sock \
 	vfsd-mock:latest \
 	/usr/local/bin/vfsd-mock --shared-dir /shared-dir  --file /shared-dir/demo-file
-#	busybox \
-#	sh -c "touch /tmp/blabla && chown 1000:1000 /tmp/blabla"
