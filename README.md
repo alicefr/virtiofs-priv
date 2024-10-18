@@ -33,3 +33,18 @@ The `demo.json` is the standard profile, which can be found under `/usr/share/co
        ]
 }
 ```
+
+## Testing with virtiofsd
+### Build
+```bash
+./build-vfsd.sh
+```
+### Demo
+Run the virtiofs-priv program:
+```bash
+./target/debug/vfsd-priv -s /tmp/demo.sock
+```
+Launch the rootless container with the `demo.sh` script
+```bash
+./demo-vfsd.sh
+```
