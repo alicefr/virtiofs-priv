@@ -299,6 +299,35 @@ fn write_file_handler(fh: &FileHandle, pid: u32, addr: u64) -> Result<(), OpErro
     Ok(())
 }
 
+fn write_mount_id(mntid: MountId, pid: u32, addr: u64) -> Result<(), OpError> {
+    let remote = iovec {
+        iov_base: addr as *mut c_void,
+        iov_len: mem::size_of::<MountId>(),
+    };
+    let local = iovec {
+        iov_base: ptr::addr_of!(mntid) as *mut c_void,
+        iov_len: mem::size_of::<MountId>(),
+    };
+    unsafe {
+        if let Err(err) = syscall(
+            syscalls::Sysno::process_vm_writev,
+            &SyscallArgs::new(
+                pid as usize,
+                ptr::addr_of!(local) as usize,
+                1,
+                ptr::addr_of!(remote) as usize,
+                1,
+                0,
+            ),
+        ) {
+            return Err(OpError::new(
+                format!("process_vm_writev failed: {}", err).as_str(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn read_file_handler(pid: u32, addr: u64) -> Result<CFileHandle, OpError> {
     let fh = CFileHandle::default();
     let remote = iovec {
@@ -360,6 +389,12 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
         println!("failed to write the file handler: {}", err);
         return ResultOp { val: 0, error: -1 };
     }
+
+    if let Err(err) = write_mount_id(fh.mnt_id, req.pid, req.data.args[3]) {
+        println!("failed to write the mount id: {}", err);
+        return ResultOp { val: 0, error: -1 };
+    }
+
     ResultOp { val: 0, error: 0 }
 }
 
