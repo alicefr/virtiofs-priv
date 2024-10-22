@@ -14,7 +14,7 @@ use std::io::IoSliceMut;
 use std::mem;
 use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{AncillaryData, SocketAncillary};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -299,6 +299,8 @@ fn write_file_handler(fh: &FileHandle, pid: u32, addr: u64) -> Result<(), OpErro
     Ok(())
 }
 
+// FIXME: this function is redundant we should write the mount_id in a single
+// process_vm_writev by adding a extra iovec element
 fn write_mount_id(mntid: MountId, pid: u32, addr: u64) -> Result<(), OpError> {
     let remote = iovec {
         iov_base: addr as *mut c_void,
@@ -383,7 +385,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     }
 
     // sign FH
-    sign(&mut fh);
+    //sign(&mut fh);
 
     if let Err(err) = write_file_handler(&fh, req.pid, req.data.args[2]) {
         println!("failed to write the file handler: {}", err);
