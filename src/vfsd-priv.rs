@@ -75,6 +75,9 @@ const SECCOMP_IOCTL_NOTIF_ID_VALID: usize = 0x40082102;
 const SECCOMP_IOCTL_NOTIF_SEND: usize = 0xc0182101;
 const SECCOMP_IOCTL_NOTIF_ADDFD: usize = 0x40182103;
 
+const SECCOMP_ADDFD_FLAG_SETFD: u32 =	1 << 0;
+const SECCOMP_ADDFD_FLAG_SEND: u32 =	1 << 1;
+
 #[repr(C)]
 #[derive(Default)]
 struct SeccompData {
@@ -404,6 +407,8 @@ fn create_fd_target(fd: RawFd, id: u64, srcfd: usize) -> Result<usize, OpError> 
     let resp = SeccompNotifAddfd {
         id: id,
         flags: 0,
+        // flags: SECCOMP_ADDFD_FLAG_SETFD,
+        // flags: SECCOMP_ADDFD_FLAG_SEND,
         srcfd: srcfd as u32,
         newfd: 0,
         newfd_flags: 0,
