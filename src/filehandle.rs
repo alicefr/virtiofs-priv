@@ -7,7 +7,11 @@ use std::os::fd::{AsRawFd, FromRawFd};
 pub use sys::{CFileHandle, MAX_HANDLE_SZ};
 
 const EMPTY_CSTR: &[u8] = b"\0";
-pub type MountId = u64;
+
+// the MountId type in virtiofsd is u64,
+// but virtiofsd uses 2 different types the MountId one, c_int for calling the syscalls
+// we need to use the correct type: c_int (i32)
+pub type MountId = libc::c_int;
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FileHandle {
