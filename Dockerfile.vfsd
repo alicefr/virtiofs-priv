@@ -13,5 +13,7 @@ FROM quay.io/centos/centos:stream9
 RUN yum install -y strace libcap-ng libseccomp && yum clean all
 
 COPY --from=builder /src/target/debug/virtiofsd /usr/local/bin/virtiofsd
+COPY run-vfsd.sh /
+
 RUN useradd -ms /bin/bash test
 USER test

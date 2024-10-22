@@ -48,3 +48,8 @@ Launch the rootless container with the `demo.sh` script
 ```bash
 ./demo-vfsd.sh
 ```
+
+Once inside the container just run
+```bash
+/run-vfsd.sh
+```
