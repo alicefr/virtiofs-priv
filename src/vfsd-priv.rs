@@ -450,14 +450,20 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
         ) {
             Ok(fd) => fd,
             Err(err) => {
-                println!("open_by_handle_at: {}", err);
+                println!("open_by_handle_at error: {}", err);
                 return ResultOp { val: 0, error: -1 };
             }
         }
     };
+
+    println!("do_open_by_handle_at: src_fd = {}", src_fd);
+
     let target_fd = match create_fd_target(fd, req.id, src_fd) {
         Ok(fd) => fd,
-        Err(err) => return ResultOp { val: 0, error: -1 },
+        Err(err) => {
+            println!("do_open_by_handle_at: create_fd_target error: {err:?}");
+            return ResultOp { val: 0, error: -1 }
+        }
     };
     println!("fd: {}", target_fd);
     ResultOp {
