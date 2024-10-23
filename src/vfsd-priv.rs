@@ -159,12 +159,15 @@ fn epoll_create(fd: RawFd) -> io::Result<RawFd> {
 
     Ok(epoll_fd as i32)
 }
-fn is_cookie_valid(fd: RawFd, id: u64) {
-    ioctl_seccomp(
+fn is_cookie_valid(fd: RawFd, id: u64) -> bool {
+    match ioctl_seccomp(
         fd as usize,
         SECCOMP_IOCTL_NOTIF_ID_VALID,
         ptr::addr_of!(id) as usize,
-    );
+    ){
+        Ok(_) => true,
+        Err(_) => false,
+    }
 }
 
 /*
@@ -424,7 +427,10 @@ fn create_fd_target(fd: RawFd, id: u64, srcfd: usize) -> Result<usize, OpError> 
 }
 
 fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
-    is_cookie_valid(fd, req.id);
+    if !is_cookie_valid(fd, req.id) {
+        println!("cookie isn't valid");
+        return ResultOp { val: 0, error: -1 };
+    }
     let fhh = match read_file_handler(req.pid, req.data.args[1]) {
         Ok(fhh) => fhh,
         Err(err) => {
@@ -462,7 +468,6 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     };
 
     println!("do_open_by_handle_at: src_fd = {}", src_fd);
-
     let target_fd = match create_fd_target(fd, req.id, src_fd) {
         Ok(fd) => fd,
         Err(err) => {
