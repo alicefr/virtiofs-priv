@@ -453,7 +453,7 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
             &SyscallArgs::new(
                 mount_fd.as_fd().as_raw_fd() as usize,
                 ptr::addr_of!(fhh) as usize,
-                req.data.args[2] as usize,
+                (req.data.args[2] & !(libc::O_PATH as u64)) as usize,
                 0,
                 0,
                 0,
