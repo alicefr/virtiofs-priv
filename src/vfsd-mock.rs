@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::{fs, io};
+use std::{fs, io, thread};
 
 mod filehandle;
 mod oslib;
@@ -36,16 +36,25 @@ fn main() {
     let shared_dir = fs::canonicalize(args.shared_dir).expect("valid shared dir");
     let root_dir_fd = open(shared_dir).expect("open shared dir");
 
+    let pre_ser = thread::spawn(move ||  {
+        let file_fh = {
+            let shared_file = fs::canonicalize(args.file).expect("valid filename");
+            let file_fd = open(shared_file).expect("open file");
+            FileHandle::from_fd(&file_fd).expect("name_to_handle_at")
+        };
+        println!("\n(name_to_handle_at) received FH: {:?}\n", file_fh);
+    });
+
+    pre_ser.join().unwrap();
+
     // access file
-    let file_fh = {
-        let shared_file = fs::canonicalize(args.file).expect("valid filename");
-        let file_fd = open(shared_file).expect("open file");
-        FileHandle::from_fd(&file_fd).expect("name_to_handle_at")
-    };
-    println!("\n(name_to_handle_at) received FH: {:?}\n", file_fh);
+
+    /*
     let flags = libc::O_CREAT | libc::O_APPEND | libc::O_RDWR;
     let mut f = open_by_handle_at(&root_dir_fd, &file_fh.handle, flags).expect("open_by_handle_at");
     println!("\n(open_by_handle_at) received FD: {}\n", f.as_raw_fd());
     write!(&mut f, "It works!").expect("failed to write");
+
+     */
     println!("it works!");
 }

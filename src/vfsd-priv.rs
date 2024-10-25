@@ -7,7 +7,7 @@ use crate::fs::File;
 use clap::Parser;
 use libc::*;
 use std::error::Error;
-use std::fmt;
+use std::{fmt, time};
 use std::fs;
 use std::io;
 use std::io::IoSliceMut;
@@ -79,7 +79,7 @@ const SECCOMP_ADDFD_FLAG_SETFD: u32 =	1 << 0;
 const SECCOMP_ADDFD_FLAG_SEND: u32 =	1 << 1;
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct SeccompData {
     nr: c_int,
     arch: u32,
@@ -88,7 +88,7 @@ struct SeccompData {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct SeccompNotif {
     id: u64,
     pid: u32,
@@ -97,7 +97,7 @@ struct SeccompNotif {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct SeccompNotifResp {
     id: u64,
     val: i64,
@@ -106,7 +106,7 @@ struct SeccompNotifResp {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct SeccompNotifAddfd {
     id: u64,
     flags: u32,
@@ -193,12 +193,12 @@ struct ResultOp {
     error: i32,
 }
 
-fn process_name_to_handle_at(pid: u32, fd: u64) -> FileHandle {
+fn process_name_to_handle_at(pid: u32, fd: u64) -> io::Result<FileHandle> {
     // Note: get a FD dup, instead of using "pidfd_open/pidfd_getfd" we can open
     // "/proc/{pid}/fd/{fd}", we should check which one is faster, taking into account
     // that we can cache the "pidfd". (I think pidfd_getfd() is faster but I could be wrong,
     // so we need to benchmark it.
-    let fd = get_process_fd(pid, fd).expect("file fd");
+    let fd = get_process_fd(pid, fd)?;
 
     // Note: name_to_handle_at() returns EOPNOTSUPP if the fs is overlayfs
     // Note: we allocate MAX_HANDLE_SZ, but we should set "handle_bytes: MAX_HANDLE_SZ - signature_size"
@@ -210,7 +210,7 @@ fn process_name_to_handle_at(pid: u32, fd: u64) -> FileHandle {
     // If we don't want to use an extra byte, instead of checking the signature we can
     // just XOR the signature at the end of the file handle, if the result is invalid
     // open_by_handle_at() will return an error, but we could get a valid FH just by (bad) luck
-    FileHandle::from_fd(&fd).expect("get filename fh")
+    FileHandle::from_fd(&fd)
     // maybe we could return fd, to delay the close() syscall after writing the FH
 }
 
@@ -367,22 +367,31 @@ fn read_file_handler(pid: u32, addr: u64) -> Result<CFileHandle, OpError> {
 }
 
 fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
+    println!("process req: {req:?}");
+
     println!("process pid: {}", req.pid);
     println!(
         "process args: dir_Fd {}, pathname addr: 0x{:x},  fh addr: 0x{:x}, mount_id addr: {:x}",
         req.data.args[0], req.data.args[1], req.data.args[2], req.data.args[3]
     );
     // Do we need this?
-    let fh = match read_file_handler(req.pid, req.data.args[2]) {
+    // let fh = match read_file_handler(req.pid, req.data.args[2]) {
+    //     Ok(fh) => fh,
+    //     Err(err) => {
+    //         println!("{}", err);
+    //         return ResultOp { val: 0, error: -1 };
+    //     }
+    // };
+    // println!("\nFH: {:?}\n", fh);
+
+    let mut fh = match process_name_to_handle_at(req.pid, req.data.args[0]) {
         Ok(fh) => fh,
         Err(err) => {
-            println!("{}", err);
-            return ResultOp { val: 0, error: -1 };
+            println!("process_name_to_handle_at error: {err:?}");
+            return ResultOp { error: -1, val: 0 };
         }
     };
-    println!("\nFH: {:?}\n", fh);
 
-    let mut fh = process_name_to_handle_at(req.pid, req.data.args[0]);
     println!("Received FH : {:?}", fh);
 
     // check if mount id is allowed
