@@ -16,11 +16,15 @@ unsafe fn pidfd_getfd(
     libc::syscall(libc::SYS_pidfd_getfd, pidfd, targetfd, flags) as _
 }
 
+const PIDFD_THREAD: libc::c_int = libc::O_EXCL;
 pub fn get_process_fd(pid: u32, target_fd: u64) -> io::Result<OwnedFd> {
     println!("get_process_fd: pid: {pid} target_fd: {target_fd}");
     // Note: we should cache the process pidfd, so getting the fd will
     // be single syscall "pidfd_getfd"
     let pid_fd = unsafe { pidfd_open(pid as _, 0) };
+    // FIXME: we need to use PIDFD_THREAD so pidfd_open can accept the TID instead of the PID,
+    // this is not currently available in centos 9
+    //let pid_fd = unsafe { pidfd_open(pid as _, PIDFD_THREAD as libc::c_uint) };
     if pid_fd == -1 {
         return Err(Error::last_os_error());
     }

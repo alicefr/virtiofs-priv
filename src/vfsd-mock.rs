@@ -43,18 +43,17 @@ fn main() {
             FileHandle::from_fd(&file_fd).expect("name_to_handle_at")
         };
         println!("\n(name_to_handle_at) received FH: {:?}\n", file_fh);
+
+        // access file
+        let flags = libc::O_CREAT | libc::O_APPEND | libc::O_RDWR;
+        let mut f = open_by_handle_at(&root_dir_fd, &file_fh.handle, flags).expect("open_by_handle_at");
+        println!("\n(open_by_handle_at) received FD: {}\n", f.as_raw_fd());
+        write!(&mut f, "It works!").expect("failed to write");
+
+        println!("it works!");
     });
 
     pre_ser.join().unwrap();
 
-    // access file
-
-    /*
-    let flags = libc::O_CREAT | libc::O_APPEND | libc::O_RDWR;
-    let mut f = open_by_handle_at(&root_dir_fd, &file_fh.handle, flags).expect("open_by_handle_at");
-    println!("\n(open_by_handle_at) received FD: {}\n", f.as_raw_fd());
-    write!(&mut f, "It works!").expect("failed to write");
-
-     */
-    println!("it works!");
+    println!("Done!");
 }

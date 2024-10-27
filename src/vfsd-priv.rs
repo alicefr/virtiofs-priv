@@ -21,6 +21,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr;
 use std::thread;
+use procfs::process::Status;
 use syscalls::{syscall, SyscallArgs};
 
 use crate::filehandle::{MountId, MAX_HANDLE_SZ};
@@ -196,7 +197,7 @@ struct ResultOp {
 fn process_name_to_handle_at(pid: u32, fd: u64) -> io::Result<FileHandle> {
     // Note: get a FD dup, instead of using "pidfd_open/pidfd_getfd" we can open
     // "/proc/{pid}/fd/{fd}", we should check which one is faster, taking into account
-    // that we can cache the "pidfd". (I think pidfd_getfd() is faster but I could be wrong,
+    // that we can cache the "pidfd". I think pidfd_getfd() is faster but I could be wrong,
     // so we need to benchmark it.
     let fd = get_process_fd(pid, fd)?;
 
@@ -366,7 +367,7 @@ fn read_file_handler(pid: u32, addr: u64) -> Result<CFileHandle, OpError> {
     Ok(fh)
 }
 
-fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
+fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif, process_status: Status) -> ResultOp {
     println!("process req: {req:?}");
 
     println!("process pid: {}", req.pid);
@@ -384,7 +385,16 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     // };
     // println!("\nFH: {:?}\n", fh);
 
-    let mut fh = match process_name_to_handle_at(req.pid, req.data.args[0]) {
+
+    // let wait = time::Duration::from_secs(60);
+    // thread::sleep(wait);
+
+    // If the caller is a thread we need the TGID instead of the req.pid (i.e., the TID),
+    // otherwise pidfd_get() will fail.
+    // This is a workaround until PIDFD_THREAD is backported to centos.
+    // Alternatively, we can open "/proc/{pid}/fd/{fd}"
+    let pid = process_status.tgid as u32;
+    let mut fh = match process_name_to_handle_at(pid, req.data.args[0]) {
         Ok(fh) => fh,
         Err(err) => {
             println!("process_name_to_handle_at error: {err:?}");
@@ -435,7 +445,7 @@ fn create_fd_target(fd: RawFd, id: u64, srcfd: usize) -> Result<usize, OpError> 
     }
 }
 
-fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
+fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif, process_status: Status) -> ResultOp {
     if !is_cookie_valid(fd, req.id) {
         println!("cookie isn't valid");
         return ResultOp { val: 0, error: -1 };
@@ -448,10 +458,11 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
         }
     };
     // TODO: verify signature
-    let mount_fd = match get_process_fd(req.pid, req.data.args[0]) {
+    let tgid = process_status.tgid as u32;
+    let mount_fd = match get_process_fd(tgid, req.data.args[0]) {
         Ok(fd) => fd,
         Err(err) => {
-            println!("failed to get mount fd: {}", err);
+            println!("failed to get process fd: {}", err);
             return ResultOp { val: 0, error: -1 };
         }
     };
@@ -547,13 +558,32 @@ fn send_response(fd: RawFd, req: &SeccompNotif, res: &ResultOp) {
 }
 
 fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) {
+    // Get process info before entering its mount namespace
+    let process = match oslib::get_process_info(req.pid) {
+        Ok(p) => p,
+        Err(err) => {
+            println!("get_process_info error: {err:?}");
+            return;
+        }
+    };
+
+    // this is the TID really, not the main PID
+    println!("PrecessInfo pid: {} ", process.pid());
+
+    // TODO: if it's not virtiofsd we should get ths syscall going though, and let the kernel respond
+    println!("PrecessInfo exe: {:?} ", process.exe());
+
+    // We can get the TGID and EUID/EGID from here
+    let process_status = process.status().unwrap();
+    println!("PrecessInfo status: {:?} ", process_status);
+
     if let Err(err) = set_mount_ns(req.pid) {
         print!("Failed to set the mount ns: {}", err);
         return;
     }
     let res = match nr {
-        syscalls::Sysno::name_to_handle_at => do_name_to_handle_at(fd, req),
-        syscalls::Sysno::open_by_handle_at => do_open_by_handle_at(fd, req),
+        syscalls::Sysno::name_to_handle_at => do_name_to_handle_at(fd, req, process_status),
+        syscalls::Sysno::open_by_handle_at => do_open_by_handle_at(fd, req, process_status),
         _ => {
             println!("no operation implemented for {}", nr.name());
             ResultOp { val: 0, error: -1 }
