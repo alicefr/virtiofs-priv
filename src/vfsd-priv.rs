@@ -467,13 +467,15 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif, process_status: Status) -
         }
     };
 
+    // Let's open the file as O_RDONLY ignoring any open flag to avoid any privilege escalation
     let src_fd = unsafe {
         match syscall(
             syscalls::Sysno::open_by_handle_at,
             &SyscallArgs::new(
                 mount_fd.as_fd().as_raw_fd() as usize,
                 ptr::addr_of!(fhh) as usize,
-                (req.data.args[2] & !(libc::O_PATH as u64)) as usize,
+                //(req.data.args[2] & !(libc::O_PATH as u64)) as usize,
+                libc::O_RDONLY as usize,
                 0,
                 0,
                 0,
