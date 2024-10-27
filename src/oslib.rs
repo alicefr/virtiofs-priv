@@ -1,7 +1,8 @@
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::io::Error;
+use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 unsafe fn pidfd_open(pid: libc::pid_t, flags: libc::c_uint) -> libc::c_int {
@@ -59,4 +60,55 @@ pub fn openat(dir_fd: &impl AsRawFd, path: &str, flags: libc::c_int) -> io::Resu
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+pub use libc::statx as statx_st;
+use libc::{pid_t, STATX_BASIC_STATS, STATX_MNT_ID};
+use procfs::process::Process;
+use procfs::ProcResult;
+
+unsafe fn do_statx(
+    dirfd: libc::c_int,
+    pathname: *const libc::c_char,
+    flags: libc::c_int,
+    mask: libc::c_uint,
+    statxbuf: *mut statx_st,
+) -> libc::c_int {
+    libc::syscall(libc::SYS_statx, dirfd, pathname, flags, mask, statxbuf) as libc::c_int
+}
+
+const EMPTY_CSTR: &[u8] = b"\0";
+pub fn statx(dir: &impl AsRawFd) -> io::Result<statx_st> {
+    let mut stx_ui = MaybeUninit::<statx_st>::zeroed();
+
+    // Safe because this is a constant value and a valid C string.
+    let path = unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) };
+
+    // Safe because the kernel will only write data in `stx_ui` and we
+    // check the return value.
+    let res = unsafe {
+        do_statx(
+            dir.as_raw_fd(),
+            path.as_ptr(),
+            libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
+            STATX_BASIC_STATS | STATX_MNT_ID,
+            stx_ui.as_mut_ptr(),
+        )
+    };
+
+    if res >= 0 {
+        // Safe because we are only going to use the SafeStatXAccess
+        // trait methods
+        let stx = unsafe { stx_ui.assume_init() };
+
+        // if `statx()` doesn't provide the mount id (before kernel 5.8),
+        // let's try `name_to_handle_at()`, if everything fails just use 0
+        Ok(stx)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+pub fn get_process_info(pid: u32) -> ProcResult<Process> {
+    Process::new(pid as i32)
 }

@@ -490,6 +490,11 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif, process_status: Status) -
     };
 
     println!("do_open_by_handle_at: src_fd = {}", src_fd);
+
+    if not_enough_privileges(src_fd as RawFd, process_status) {
+        return ResultOp { val: 0, error: -1 };
+    }
+
     let target_fd = match create_fd_target(fd, req.id, src_fd) {
         Ok(fd) => fd,
         Err(err) => {
@@ -504,6 +509,26 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif, process_status: Status) -
     }
 }
 
+fn not_enough_privileges(fd: RawFd, process_status: Status) -> bool {
+    let uid = process_status.euid; // should be fuid (filesystem uid)?
+    let gid = process_status.egid;
+
+    println!("do_open_by_handle_at: Checking privileges for uid: {}, gid: {}", uid, gid);
+    let st = match oslib::statx(&fd){
+        Ok(stx) => stx,
+        Err(err) => {
+            println!("statx error: {err}");
+            return true;
+        }
+    };
+
+    println!("fd stx_uid {}, stx_gid {}, stx_mode {:o}", st.stx_uid, st.stx_gid, st.stx_mode);
+    // Can read?
+    // the owner can change the permission, so it's ok to allow it even if the read bit is not set
+    st.stx_uid != uid
+        && (st.stx_gid != gid || st.stx_mode & 0o040 == 0)
+        && st.stx_mode & 0o004 == 0
+}
 fn set_mount_ns(pid: u32) -> Result<(), OpError> {
     let path = format!("/proc/{}/ns/mnt", pid);
     println!("Set mount namespace to {}", path);
