@@ -519,21 +519,23 @@ fn monitor_process(fd: RawFd) {
     // Start monitoring the process with the seccomp notifier
     loop {
         let mut ready_events = vec![EpollEvent::default(); MAX_EVENTS];
-        println!("Waiting syscall...");
         let n = epoll.wait(-1, &mut ready_events[..]).unwrap();
         for _ in 0..n {
             let req = SeccompNotif::default();
-            let _ = ioctl_seccomp(
+            if let Err(e) = ioctl_seccomp(
                 fd as usize,
                 SECCOMP_IOCTL_NOTIF_RECV,
                 ptr::addr_of!(req) as usize,
-            );
+            ) {
+                // Ignore the failed request
+                continue;
+            }
             match syscalls::Sysno::new(req.data.nr as usize) {
                 Some(s) => {
                     println!("recieved syscall: {}", s.name());
                     thread::spawn(move || do_operations(fd, s, &req));
                 }
-                _ => panic!("syscall nr: {} not recognized", req.data.nr),
+                _ => println!("syscall nr: {} not recognized", req.data.nr),
             };
         }
     }
