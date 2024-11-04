@@ -25,6 +25,7 @@ use syscalls::{syscall, SyscallArgs};
 
 extern crate vmm_sys_util;
 use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
+use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 
 use crate::filehandle::{MountId, MAX_HANDLE_SZ};
 use crate::oslib::get_process_fd;
@@ -539,35 +540,13 @@ fn monitor_process(fd: RawFd) {
 }
 
 fn handle_client(socket: UnixStream) {
-    println!("handle connection");
-    // Read the fd from the ancillary data
-    let mut buf1 = [1; 8];
-    let mut buf2 = [2; 16];
-    let mut buf3 = [3; 8];
-    let bufs = &mut [
-        IoSliceMut::new(&mut buf1),
-        IoSliceMut::new(&mut buf2),
-        IoSliceMut::new(&mut buf3),
-    ][..];
-    //    let mut fds = [0; 8];
-    let mut ancillary_buffer = [0; 128];
-    let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
-    match socket.recv_vectored_with_ancillary(bufs, &mut ancillary) {
-        Ok(data) => data,
-        Err(e) => panic!("wrong type of data recieved {e}"),
+    let mut buf = [0u8];
+    let (_, file) = unsafe {
+        socket
+            .recv_with_fd(&mut buf[..])
+            .expect("failed to recieve the fd")
     };
-    for ancillary_result in ancillary.messages() {
-        if let AncillaryData::ScmRights(mut scm_rights) = match ancillary_result {
-            Ok(data) => data,
-            Err(_) => panic!("wrong type of data recieved"),
-        } {
-            // TODO: error if there are more then 1 fd
-            if let Some(fd) = scm_rights.next() {
-                println!("recieved fd: {}", fd);
-                monitor_process(fd)
-            };
-        }
-    }
+    monitor_process(file.unwrap().as_raw_fd());
 }
 
 fn main() -> std::io::Result<()> {
