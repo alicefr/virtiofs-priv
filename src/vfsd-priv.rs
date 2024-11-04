@@ -7,6 +7,7 @@ use crate::fs::File;
 use clap::Parser;
 use libc::*;
 use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::io::IoSliceMut;
@@ -20,12 +21,10 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr;
 use std::thread;
-use std::{fmt, time};
 use syscalls::{syscall, SyscallArgs};
 
 extern crate vmm_sys_util;
 use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
-use vmm_sys_util::eventfd::EventFd;
 
 use crate::filehandle::{MountId, MAX_HANDLE_SZ};
 use crate::oslib::get_process_fd;
@@ -78,9 +77,6 @@ const SECCOMP_IOCTL_NOTIF_RECV: usize = 0xc0502100;
 const SECCOMP_IOCTL_NOTIF_ID_VALID: usize = 0x40082102;
 const SECCOMP_IOCTL_NOTIF_SEND: usize = 0xc0182101;
 const SECCOMP_IOCTL_NOTIF_ADDFD: usize = 0x40182103;
-
-const SECCOMP_ADDFD_FLAG_SETFD: u32 = 1 << 0;
-const SECCOMP_ADDFD_FLAG_SEND: u32 = 1 << 1;
 
 #[repr(C)]
 #[derive(Default, Debug)]
@@ -153,13 +149,6 @@ fn is_cookie_valid(fd: RawFd, id: u64) -> bool {
  *    };
  */
 
-#[repr(C)]
-#[derive(Debug, Default)]
-struct FileHandleHeader {
-    handle_bytes: u32,
-    handle_type: c_int,
-}
-
 struct ResultOp {
     val: i64,
     error: i32,
@@ -231,21 +220,6 @@ impl Error for OpError {
     fn description(&self) -> &str {
         &self.msg
     }
-}
-
-fn get_mem_file(pid: u32) -> Result<File, OpError> {
-    match File::options()
-        .read(true)
-        .write(true)
-        .open(format!("/proc/{}/mem", pid))
-    {
-        Ok(f) => return Ok(f),
-        Err(err) => {
-            return Err(OpError::new(
-                format!("failed to open mem from proc: {}", err).as_str(),
-            ))
-        }
-    };
 }
 
 fn write_file_handler(fh: &FileHandle, pid: u32, addr: u64) -> Result<(), OpError> {
@@ -338,7 +312,7 @@ fn read_file_handler(pid: u32, addr: u64) -> Result<CFileHandle, OpError> {
     Ok(fh)
 }
 
-fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
+fn do_name_to_handle_at(req: &SeccompNotif) -> ResultOp {
     println!("process req: {req:?}");
 
     println!("process pid: {}", req.pid);
@@ -356,7 +330,7 @@ fn do_name_to_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     // };
     // println!("\nFH: {:?}\n", fh);
 
-    let mut fh = match process_name_to_handle_at(req.pid, req.data.args[0]) {
+    let fh = match process_name_to_handle_at(req.pid, req.data.args[0]) {
         Ok(fh) => fh,
         Err(err) => {
             println!("process_name_to_handle_at error: {err:?}");
@@ -391,8 +365,6 @@ fn create_fd_target(fd: RawFd, id: u64, srcfd: usize) -> Result<usize, OpError> 
     let resp = SeccompNotifAddfd {
         id: id,
         flags: 0,
-        // flags: SECCOMP_ADDFD_FLAG_SETFD,
-        // flags: SECCOMP_ADDFD_FLAG_SEND,
         srcfd: srcfd as u32,
         newfd: 0,
         newfd_flags: 0,
@@ -524,7 +496,7 @@ fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) {
         return;
     }
     let res = match nr {
-        syscalls::Sysno::name_to_handle_at => do_name_to_handle_at(fd, req),
+        syscalls::Sysno::name_to_handle_at => do_name_to_handle_at(req),
         syscalls::Sysno::open_by_handle_at => do_open_by_handle_at(fd, req),
         _ => {
             println!("no operation implemented for {}", nr.name());
