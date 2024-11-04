@@ -7,21 +7,25 @@ use crate::fs::File;
 use clap::Parser;
 use libc::*;
 use std::error::Error;
-use std::{fmt, time};
 use std::fs;
 use std::io;
 use std::io::IoSliceMut;
 use std::mem;
+use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
-use std::os::fd::{AsFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{AncillaryData, SocketAncillary};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr;
 use std::thread;
+use std::{fmt, time};
 use syscalls::{syscall, SyscallArgs};
+
+extern crate vmm_sys_util;
+use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
+use vmm_sys_util::eventfd::EventFd;
 
 use crate::filehandle::{MountId, MAX_HANDLE_SZ};
 use crate::oslib::get_process_fd;
@@ -75,8 +79,8 @@ const SECCOMP_IOCTL_NOTIF_ID_VALID: usize = 0x40082102;
 const SECCOMP_IOCTL_NOTIF_SEND: usize = 0xc0182101;
 const SECCOMP_IOCTL_NOTIF_ADDFD: usize = 0x40182103;
 
-const SECCOMP_ADDFD_FLAG_SETFD: u32 =	1 << 0;
-const SECCOMP_ADDFD_FLAG_SEND: u32 =	1 << 1;
+const SECCOMP_ADDFD_FLAG_SETFD: u32 = 1 << 0;
+const SECCOMP_ADDFD_FLAG_SEND: u32 = 1 << 1;
 
 #[repr(C)]
 #[derive(Default, Debug)]
@@ -127,44 +131,12 @@ fn ioctl_seccomp(arg0: usize, arg1: usize, arg2: usize) -> Result<usize, OpError
     }
 }
 
-fn epoll_create(fd: RawFd) -> io::Result<RawFd> {
-    if fd < 0 {
-        panic!("Invalid fd")
-    }
-    let epoll_fd = unsafe {
-        syscall(
-            syscalls::Sysno::epoll_create1,
-            &SyscallArgs::new(0, 0, 0, 0, 0, 0),
-        )
-        .expect("epoll_create1 failed")
-    };
-    let event = libc::epoll_event {
-        events: EPOLLIN as u32,
-        u64: fd as u64,
-    };
-    unsafe {
-        syscall(
-            syscalls::Sysno::epoll_ctl,
-            &SyscallArgs::new(
-                epoll_fd as usize,
-                libc::EPOLL_CTL_ADD as usize,
-                fd as usize,
-                ptr::addr_of!(event) as usize,
-                0,
-                0,
-            ),
-        )
-        .expect("epoll_ctl failed");
-    };
-
-    Ok(epoll_fd as i32)
-}
 fn is_cookie_valid(fd: RawFd, id: u64) -> bool {
     match ioctl_seccomp(
         fd as usize,
         SECCOMP_IOCTL_NOTIF_ID_VALID,
         ptr::addr_of!(id) as usize,
-    ){
+    ) {
         Ok(_) => true,
         Err(_) => false,
     }
@@ -481,7 +453,7 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
         Ok(fd) => fd,
         Err(err) => {
             println!("do_open_by_handle_at: create_fd_target error: {err:?}");
-            return ResultOp { val: 0, error: -1 }
+            return ResultOp { val: 0, error: -1 };
         }
     };
     println!("fd: {}", target_fd);
@@ -563,37 +535,34 @@ fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) {
 }
 
 fn monitor_process(fd: RawFd) {
-    let epoll_fd = epoll_create(fd).expect("failed to create events");
+    let epoll = Epoll::new().unwrap();
+    epoll
+        .ctl(
+            ControlOperation::Add,
+            fd as i32,
+            EpollEvent::new(EventSet::IN, fd as u64),
+        )
+        .unwrap();
     // Start monitoring the process with the seccomp notifier
     loop {
-        let events = [libc::epoll_event { events: 0, u64: 0 }; MAX_EVENTS];
-        unsafe {
-            syscall(
-                syscalls::Sysno::epoll_wait,
-                &SyscallArgs::new(
-                    epoll_fd as usize,
-                    ptr::addr_of!(events) as usize,
-                    MAX_EVENTS,
-                    i32::from(-1) as usize,
-                    0,
-                    0,
-                ),
-            )
-            .expect("epoll_create1 failed")
-        };
-        let req = SeccompNotif::default();
-        ioctl_seccomp(
-            fd as usize,
-            SECCOMP_IOCTL_NOTIF_RECV,
-            ptr::addr_of!(req) as usize,
-        );
-        match syscalls::Sysno::new(req.data.nr as usize) {
-            Some(s) => {
-                println!("recieved syscall: {}", s.name());
-                thread::spawn(move || do_operations(fd, s, &req));
-            }
-            _ => panic!("syscall nr: {} not recognized", req.data.nr),
-        };
+        let mut ready_events = vec![EpollEvent::default(); MAX_EVENTS];
+        println!("Waiting syscall...");
+        let n = epoll.wait(-1, &mut ready_events[..]).unwrap();
+        for _ in 0..n {
+            let req = SeccompNotif::default();
+            let _ = ioctl_seccomp(
+                fd as usize,
+                SECCOMP_IOCTL_NOTIF_RECV,
+                ptr::addr_of!(req) as usize,
+            );
+            match syscalls::Sysno::new(req.data.nr as usize) {
+                Some(s) => {
+                    println!("recieved syscall: {}", s.name());
+                    thread::spawn(move || do_operations(fd, s, &req));
+                }
+                _ => panic!("syscall nr: {} not recognized", req.data.nr),
+            };
+        }
     }
 }
 
