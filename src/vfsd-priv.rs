@@ -20,6 +20,8 @@ use std::ptr;
 use std::thread;
 use syscalls::{syscall, SyscallArgs};
 
+use std::env;
+
 extern crate vmm_sys_util;
 use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
@@ -555,17 +557,24 @@ fn handle_client(socket: UnixStream) {
     monitor_process(file.unwrap().as_raw_fd());
 }
 
+fn set_default_logger(log_level: LevelFilter) {
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", log_level.to_string());
+    }
+    env_logger::init();
+}
+
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
+    set_default_logger(args.log_level);
+
     debug!("Socket path file: {}", args.socket);
     if Path::new(&args.socket).exists() {
         fs::remove_file(args.socket.clone())?;
     }
     let listener = UnixListener::bind(args.socket.clone())?;
-
     fs::set_permissions(args.socket, fs::Permissions::from_mode(0o777))
         .expect("set the socket permission");
-
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
