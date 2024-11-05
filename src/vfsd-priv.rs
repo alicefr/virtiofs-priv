@@ -564,6 +564,35 @@ fn set_default_logger(log_level: LevelFilter) {
     env_logger::init();
 }
 
+fn inotify_delete(path: String) -> Result<RawFd, OpError> {
+    let fd = unsafe {
+        match syscall(
+            syscalls::Sysno::inotify_init1,
+            &SyscallArgs::new(0, 0, 0, 0, 0, 0),
+            //&SyscallArgs::new(libc::IN_NONBLOCK as usize, 0, 0, 0, 0, 0),
+        ) {
+            Ok(res) => res,
+            Err(e) => return Err(OpError::new(format!("inotify_init1 failed: {e}").as_str())),
+        }
+    };
+    unsafe {
+        if let Err(e) = syscall(
+            syscalls::Sysno::inotify_add_watch,
+            &SyscallArgs::new(
+                fd,
+                path.as_ptr() as usize,
+                (libc::IN_DELETE_SELF | libc::IN_ATTRIB) as usize,
+                0,
+                0,
+                0,
+            ),
+        ) {
+            return Err(OpError::new(format!("inotify_init1 failed: {e}").as_str()));
+        }
+    }
+    Ok(fd as i32)
+}
+
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
     set_default_logger(args.log_level);
@@ -572,19 +601,60 @@ fn main() -> std::io::Result<()> {
     if Path::new(&args.socket).exists() {
         fs::remove_file(args.socket.clone())?;
     }
+
     let listener = UnixListener::bind(args.socket.clone())?;
-    fs::set_permissions(args.socket, fs::Permissions::from_mode(0o777))
+    listener
+        .set_nonblocking(true)
+        .expect("Couldn't set non blocking");
+    fs::set_permissions(&args.socket, fs::Permissions::from_mode(0o777))
         .expect("set the socket permission");
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                // Spawn thread to start monitoring each process
-                thread::spawn(|| handle_client(stream));
-            }
-            Err(_) => {
-                break;
+
+    let conn_fd = listener.as_raw_fd();
+    let epoll = Epoll::new().unwrap();
+    epoll
+        .ctl(
+            ControlOperation::Add,
+            conn_fd,
+            EpollEvent::new(EventSet::IN, conn_fd as u64),
+        )
+        .unwrap();
+    let socket_del_fd =
+        inotify_delete(args.socket.clone()).expect("failed to set inotify for the socket");
+    epoll
+        .ctl(
+            ControlOperation::Add,
+            socket_del_fd,
+            EpollEvent::new(
+                EventSet::WAKE_UP | EventSet::HANG_UP | EventSet::IN | EventSet::OUT,
+                socket_del_fd as u64,
+            ),
+        )
+        .unwrap();
+
+    let mut terminating = false;
+    while !terminating {
+        let mut ready_events = vec![EpollEvent::default(); MAX_EVENTS];
+        let n = epoll.wait(-1, &mut ready_events[..]).unwrap();
+        for event in ready_events {
+            let fd = event.data() as i32;
+            if fd == conn_fd {
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(stream) => {
+                            // Spawn thread to start monitoring each process
+                            thread::spawn(|| handle_client(stream));
+                        }
+                        Err(_) => {
+                            break;
+                        }
+                    }
+                }
+            } else if fd == socket_del_fd {
+                debug!("Socket has been removed");
+                terminating = true;
             }
         }
     }
+    debug!("Terminating");
     Ok(())
 }
