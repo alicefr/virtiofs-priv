@@ -1,10 +1,7 @@
-#![feature(unix_socket_ancillary_data)]
-
 mod filehandle;
 mod oslib;
 
 use crate::fs::File;
-use clap::CommandFactory;
 use clap::Parser;
 use libc::*;
 use log::*;
@@ -12,13 +9,11 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::io::IoSliceMut;
 use std::mem;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{AncillaryData, SocketAncillary};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr;
@@ -533,7 +528,7 @@ fn monitor_process(fd: RawFd) {
         let n = epoll.wait(-1, &mut ready_events[..]).unwrap();
         for _ in 0..n {
             let req = SeccompNotif::default();
-            if let Err(e) = ioctl_seccomp(
+            if let Err(_) = ioctl_seccomp(
                 fd as usize,
                 SECCOMP_IOCTL_NOTIF_RECV,
                 ptr::addr_of!(req) as usize,
@@ -554,11 +549,9 @@ fn monitor_process(fd: RawFd) {
 
 fn handle_client(socket: UnixStream) {
     let mut buf = [0u8];
-    let (_, file) = unsafe {
-        socket
-            .recv_with_fd(&mut buf[..])
-            .expect("failed to recieve the fd")
-    };
+    let (_, file) = socket
+        .recv_with_fd(&mut buf[..])
+        .expect("failed to recieve the fd");
     monitor_process(file.unwrap().as_raw_fd());
 }
 
