@@ -4,8 +4,10 @@ mod filehandle;
 mod oslib;
 
 use crate::fs::File;
+use clap::CommandFactory;
 use clap::Parser;
 use libc::*;
+use log::*;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -31,12 +33,32 @@ use crate::filehandle::{MountId, MAX_HANDLE_SZ};
 use crate::oslib::get_process_fd;
 use filehandle::{CFileHandle, FileHandle};
 
+fn parse_log_level(level: &str) -> Result<LevelFilter, &'static str> {
+    Ok(match level {
+        "debug" => LevelFilter::Debug,
+        "info" => LevelFilter::Info,
+        "warn" => LevelFilter::Warn,
+        "err" => LevelFilter::Error,
+        _ => return Err("Matching variant not found"),
+    })
+}
+
 /// Monitor rootless virtiofs
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[derive(Parser, Debug, Clone)]
+#[command(
+    name = "virtiofs-priv",
+    about = "virtiofs monitor for privileged operations",
+    version,
+    about,
+    args_override_self = true
+)]
 struct Args {
-    #[arg(short, long)]
+    #[arg(long = "socket")]
     socket: String,
+
+    /// Log level (error, warn, info, debug, trace, off)
+    #[arg(long = "log-level", default_value = "info", value_parser = parse_log_level)]
+    log_level: LevelFilter,
 }
 
 const MAX_EVENTS: usize = 10;
@@ -192,7 +214,7 @@ fn sign(fh: &mut FileHandle) {
 
     // for now lets just add a sum at the end of the fh_handle
     let sum: u64 = fh.handle.f_handle.iter().fold(0, |acc, x| acc + *x as u64);
-    println!("FH signature: {:?}", sum.to_ne_bytes());
+    info!("FH signature: {:?}", sum.to_ne_bytes());
     const SIGN_SIZE_BYTES: usize = (u64::BITS / 8) as usize;
     const START: usize = MAX_HANDLE_SZ - SIGN_SIZE_BYTES;
     fh.handle.f_handle[START..].copy_from_slice(&sum.to_ne_bytes());
@@ -314,32 +336,23 @@ fn read_file_handler(pid: u32, addr: u64) -> Result<CFileHandle, OpError> {
 }
 
 fn do_name_to_handle_at(req: &SeccompNotif) -> ResultOp {
-    println!("process req: {req:?}");
+    debug!("process req: {req:?}");
 
-    println!("process pid: {}", req.pid);
-    println!(
+    debug!("process pid: {}", req.pid);
+    debug!(
         "process args: dir_Fd {}, pathname addr: 0x{:x},  fh addr: 0x{:x}, mount_id addr: {:x}",
         req.data.args[0], req.data.args[1], req.data.args[2], req.data.args[3]
     );
-    // Do we need this?
-    // let fh = match read_file_handler(req.pid, req.data.args[2]) {
-    //     Ok(fh) => fh,
-    //     Err(err) => {
-    //         println!("{}", err);
-    //         return ResultOp { val: 0, error: -1 };
-    //     }
-    // };
-    // println!("\nFH: {:?}\n", fh);
 
     let fh = match process_name_to_handle_at(req.pid, req.data.args[0]) {
         Ok(fh) => fh,
         Err(err) => {
-            println!("process_name_to_handle_at error: {err:?}");
+            error!("process_name_to_handle_at error: {err:?}");
             return ResultOp { error: -1, val: 0 };
         }
     };
 
-    println!("Received FH : {:?}", fh);
+    debug!("Received FH : {:?}", fh);
 
     // check if mount id is allowed
     if !is_mount_id_allowed(fh.mnt_id) {
@@ -350,12 +363,12 @@ fn do_name_to_handle_at(req: &SeccompNotif) -> ResultOp {
     //sign(&mut fh);
 
     if let Err(err) = write_file_handler(&fh, req.pid, req.data.args[2]) {
-        println!("failed to write the file handler: {}", err);
+        error!("failed to write the file handler: {}", err);
         return ResultOp { val: 0, error: -1 };
     }
 
     if let Err(err) = write_mount_id(fh.mnt_id, req.pid, req.data.args[3]) {
-        println!("failed to write the mount id: {}", err);
+        error!("failed to write the mount id: {}", err);
         return ResultOp { val: 0, error: -1 };
     }
 
@@ -382,13 +395,13 @@ fn create_fd_target(fd: RawFd, id: u64, srcfd: usize) -> Result<usize, OpError> 
 
 fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     if !is_cookie_valid(fd, req.id) {
-        println!("cookie isn't valid");
+        error!("cookie isn't valid");
         return ResultOp { val: 0, error: -1 };
     }
     let fhh = match read_file_handler(req.pid, req.data.args[1]) {
         Ok(fhh) => fhh,
         Err(err) => {
-            println!("{}", err);
+            error!("{err}");
             return ResultOp { val: 0, error: -1 };
         }
     };
@@ -396,7 +409,7 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
     let mount_fd = match get_process_fd(req.pid, req.data.args[0]) {
         Ok(fd) => fd,
         Err(err) => {
-            println!("failed to get mount fd: {}", err);
+            error!("failed to get mount fd: {err}");
             return ResultOp { val: 0, error: -1 };
         }
     };
@@ -415,21 +428,19 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
         ) {
             Ok(fd) => fd,
             Err(err) => {
-                println!("open_by_handle_at error: {}", err);
+                error!("open_by_handle_at error: {err}");
                 return ResultOp { val: 0, error: -1 };
             }
         }
     };
 
-    println!("do_open_by_handle_at: src_fd = {}", src_fd);
     let target_fd = match create_fd_target(fd, req.id, src_fd) {
         Ok(fd) => fd,
         Err(err) => {
-            println!("do_open_by_handle_at: create_fd_target error: {err:?}");
+            error!("do_open_by_handle_at: create_fd_target error: {err:?}");
             return ResultOp { val: 0, error: -1 };
         }
     };
-    println!("fd: {}", target_fd);
     ResultOp {
         val: target_fd as i64,
         error: 0,
@@ -438,7 +449,7 @@ fn do_open_by_handle_at(fd: RawFd, req: &SeccompNotif) -> ResultOp {
 
 fn set_mount_ns(pid: u32) -> Result<(), OpError> {
     let path = format!("/proc/{}/ns/mnt", pid);
-    println!("Set mount namespace to {}", path);
+    debug!("Set mount namespace to {}", path);
     let file = match File::options().read(true).open(path) {
         Ok(f) => f,
         Err(err) => {
@@ -500,7 +511,7 @@ fn do_operations(fd: RawFd, nr: syscalls::Sysno, req: &SeccompNotif) {
         syscalls::Sysno::name_to_handle_at => do_name_to_handle_at(req),
         syscalls::Sysno::open_by_handle_at => do_open_by_handle_at(fd, req),
         _ => {
-            println!("no operation implemented for {}", nr.name());
+            error!("no operation implemented for {}", nr.name());
             ResultOp { val: 0, error: -1 }
         }
     };
@@ -532,10 +543,10 @@ fn monitor_process(fd: RawFd) {
             }
             match syscalls::Sysno::new(req.data.nr as usize) {
                 Some(s) => {
-                    println!("recieved syscall: {}", s.name());
+                    debug!("recieved syscall: {}", s.name());
                     thread::spawn(move || do_operations(fd, s, &req));
                 }
-                _ => println!("syscall nr: {} not recognized", req.data.nr),
+                _ => error!("syscall nr: {} not recognized", req.data.nr),
             };
         }
     }
@@ -553,7 +564,7 @@ fn handle_client(socket: UnixStream) {
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
-    println!("Socket path file: {}", args.socket);
+    debug!("Socket path file: {}", args.socket);
     if Path::new(&args.socket).exists() {
         fs::remove_file(args.socket.clone())?;
     }
